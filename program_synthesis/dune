@@ -1,0 +1,6 @@
+(executables
+ (names execute deduplicate compress)
+ (modes native)
+ (libraries core antireduce antireduce_graphs)
+ (preprocess
+  (pps ppx_jane ppx_yojson_conv)))
