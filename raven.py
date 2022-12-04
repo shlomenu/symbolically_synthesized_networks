@@ -7,11 +7,13 @@ from torchvision.io import read_image
 import numpy as np
 from tqdm import trange
 import pickle
+import math
+from copy import deepcopy
 
 
 class RavenDataset(Dataset):
 
-    def __init__(self, dataset_dir):
+    def __init__(self, dataset_dir, load_correct=True, load_incorrect=False):
         self.dataset_dir = dataset_dir
         self.data_dir = os.path.join(self.dataset_dir, "data")
         self.meta_dir = os.path.join(self.dataset_dir, "meta")
@@ -20,12 +22,12 @@ class RavenDataset(Dataset):
         for filename in os.listdir(self.data_dir):
             no_ext = filename.split(".")[0]
             parts = no_ext.split("_")[1:]
-            if len(parts) == 4:
+            if len(parts) == 4 and load_correct:
                 instance_index, background_color, label = int(parts[0]), int(
                     parts[2]), parts[3]
                 assert label == "answer"
                 multi_indices.add((instance_index, -1, background_color))
-            elif len(parts) == 5:
+            elif len(parts) == 5 and load_incorrect:
                 instance_index, background_color, label, alternative_index = int(
                     parts[0]), int(parts[2]), parts[3], int(parts[4])
                 assert label == "alternative"
@@ -40,12 +42,11 @@ class RavenDataset(Dataset):
         instance, sub_instance, background_color = self.multi_indices[i]
         if sub_instance < 0:
             filename = f"rpm_{instance}_background_{background_color}_answer.png"
-            label = 1
         else:
             filename = f"rpm_{instance}_background_{background_color}_alternative_{sub_instance}.png"
-            label = 0
         img = read_image(os.path.join(self.data_dir, filename))
-        return img.float(), label
+        img = (2. * (img / 255.) - 1.).float()
+        return img, img
 
     def description(self, i):
         instance, _, _ = self.multi_indices[i]
@@ -64,6 +65,44 @@ class RavenDataset(Dataset):
         filename = f"rpm_{instance}.pkl"
         with open(os.path.join(self.pkl_dir, filename)) as f:
             return pickle.load(f)
+
+    @classmethod
+    def split(cls, dataset_dir, val_prop, test_prop, load_correct=True, load_incorrect=False):
+        """
+        Creates (train, test, val) split of all data under dataset_dir.  The test instances are 
+        enumerated from the end of the sorted list of multi-indices, which dependent only on the names
+        of the files not the order in which the operating system displays files.  Among the remaining, 
+        the validation set is chosen randomly.  The proportion of test data is interpreted as a 
+        proportion of the total; the proportion of validation data is interpreted as the proportion of 
+        what remains after test data is set aside.  To perform K-fold cross validation with leftover test 
+        data, for example, you would use `val_prop=.33`, not `val_prop=(.33 * (1 - test_prop)).  
+        """
+        assert (val_prop < 1. and test_prop < 1.)
+        dataset = cls(dataset_dir, load_correct=load_correct,
+                      load_incorrect=load_incorrect)
+        indices = deepcopy(dataset.multi_indices)
+        del dataset.multi_indices[:]
+        train, val, test = deepcopy(dataset), deepcopy(
+            dataset), deepcopy(dataset)
+        n_instances = len(
+            {instance for (instance, _, _) in indices})
+        puzzles_per_instance = len(indices) // n_instances
+        assert (n_instances * puzzles_per_instance == len(indices))
+        n_test_instances = math.ceil(test_prop * n_instances)
+        n_train_val_instances = math.floor((1 - test_prop) * n_instances)
+        test_split = -(n_test_instances * puzzles_per_instance)
+        test.multi_indices = deepcopy(indices[test_split:])
+        n_val_instances = math.ceil(val_prop * n_train_val_instances)
+        val_instances_idx = sorted(np.random.choice(
+            n_train_val_instances, n_val_instances, replace=False))
+        val.multi_indices = [indices[idx] for idx in val_instances_idx]
+        for i, datum in enumerate(indices[:test_split]):
+            if val_instances_idx and i == val_instances_idx[0]:
+                del val_instances_idx[0]
+                continue
+            else:
+                train.multi_indices.append(datum)
+        return train, val, test
 
 
 def generate_data(size, dataset_dir, save_pickle=False):
