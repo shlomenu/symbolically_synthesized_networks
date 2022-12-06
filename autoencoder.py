@@ -15,13 +15,13 @@ class PositionalEmbedding(nn.Module):
 
 class StrideConv_ViT_Encoder(nn.Module):
 
-    def __init__(self, codebook_dim, input_size, input_c, upsize_c,
+    def __init__(self, codebook_dim, input_size, input_channels, upsize_channels,
                  vit_in_size, vit_depth, vit_heads, vit_head_dim, vit_mlp_dim):
         super().__init__()
         assert (input_size >= vit_in_size and vit_depth > 2)
-        stem_dims, HW, C = [], input_size, input_c
+        stem_dims, HW, C = [], input_size, input_channels
         while HW > vit_in_size:
-            out_channels = 2 * C if C != input_c else upsize_c
+            out_channels = 2 * C if C != input_channels else upsize_channels
             stem_dims.append((C, out_channels))
             HW, C = HW // 2, out_channels
         assert (HW == vit_in_size and C == codebook_dim)
@@ -55,13 +55,13 @@ class StrideConv_ViT_Encoder(nn.Module):
 
 class StrideConv_ViT_Decoder(nn.Module):
 
-    def __init__(self, codebook_dim, input_size, input_c, upsize_c,
+    def __init__(self, codebook_dim, input_size, input_channels, upsize_channels,
                  vit_in_size, vit_depth, vit_heads, vit_head_dim, vit_mlp_dim):
         super().__init__()
         assert (input_size >= vit_in_size and vit_depth > 1)
-        stem_dims, HW, C = [], input_size, input_c
+        stem_dims, HW, C = [], input_size, input_channels
         while HW > vit_in_size:
-            out_channels = 2 * C if C != input_c else upsize_c
+            out_channels = 2 * C if C != input_channels else upsize_channels
             stem_dims.append((out_channels, C))
             HW, C = HW // 2, out_channels
         assert (HW == vit_in_size and C == codebook_dim)

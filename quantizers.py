@@ -1,4 +1,5 @@
-import os, json, math
+import os
+import json
 from typing import List
 from hashlib import blake2b
 
@@ -6,9 +7,11 @@ import dgl
 import pygraphviz as pgv
 import torch as th
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
+from restart_manager import RestartManager
 from utilities import (EXECUTE_BINARY_LOC, COLORS, compress,
                        invoke_binary_with_json, deduplicate)
 
@@ -108,8 +111,8 @@ class GraphQuantizer(nn.Module):
         self.timed_out = set()
         self.executed_programs = {}
         self.load_dsl(dsl_name)
-        self.idleness_limit = idleness_limit
-        self.utilization = {entry: (0, 0, [], 0) for entry in self.entries}
+        self.restart_manager = RestartManager(
+            idleness_limit, len(self.entries), contextual=True)
         self.attn_up = dgl.nn.GATv2Conv(in_feats=self.max_node_color,
                                         out_feats=C,
                                         num_heads=1,
@@ -145,7 +148,7 @@ class GraphQuantizer(nn.Module):
         self.to_out = nn.Sequential(*[nn.Unflatten(1, (E, C)), nn.Tanh()])
 
     def forward(self, commands):
-        graphs, feats, restarts, programs = self.execute_commands(
+        graphs, feats, restarts, hashes, programs = self.execute_commands(
             commands.tolist(), commands.device)
         feats = rearrange(self.attn_up(graphs, feats), "n ... -> n (...)")
         for attn, ff in zip(self.attns, self.ffs):
@@ -153,7 +156,7 @@ class GraphQuantizer(nn.Module):
         return self.to_out(
             self.pool(graphs,
                       self.ff_seq(self.attn_seq(graphs,
-                                                feats)))), restarts, programs
+                                                feats)))), restarts, hashes, programs
 
     @property
     def dsl_size(self):
@@ -164,18 +167,27 @@ class GraphQuantizer(nn.Module):
         with open(os.path.join(self.dsl_save_path,
                                f"{self.dsl_name}.json")) as f:
             dsl = json.load(f)
-        self.entries = tuple(ent["name"] for ent in dsl["library"])
+        entries = tuple(ent["name"] for ent in dsl["library"])
+        ent_to_ind = {v: k for k, v in enumerate(entries)}
+        ind_to_ind = {k: ent_to_ind[v]
+                      for k, v in enumerate(self.entries)}
+        self.entries, executed_programs = entries, {}
+        for frozen_commands, hash in self.executed_programs.items():
+            executed_programs[tuple(ind_to_ind[code] for code in frozen_commands)] = \
+                hash
+        self.executed_programs = executed_programs
 
     def execute_commands(self, commands: List[List[int]], device):
-        graphs, feats, restarts, programs = [], [], [], []
+        graphs, feats, restarts, hashes, programs = [], [], set(), [], []
         for cmds in commands:
-            graph, feat, program = self._execute_commands(cmds, device)
-            restarts.extend(self._find_underutilized(cmds))
+            graph, feat, hash, program = self._execute_commands(cmds, device)
+            restarts.update(self.restart_manager.find_restarts(cmds))
             graphs.append(graph)
             feats.append(feat)
+            hashes.append(hash)
             programs.append(program)
         return dgl.batch(graphs), th.cat(feats,
-                                         dim=0), list(set(restarts)), programs
+                                         dim=0), restarts, hashes, programs
 
     def _execute_commands(self, commands: List[int], device):
         frozen_commands = tuple(commands)
@@ -222,46 +234,35 @@ class GraphQuantizer(nn.Module):
             )
             self.timed_out.add(frozen_commands)
         graph, feat = dgl_homograph_of_json(resp["output"], device)
-        return graph, feat, resp["original"]
+        return graph, feat, hash, resp["original"]
 
-    def _find_underutilized(self, commands: List[int]):
-        for i, prim_idx in enumerate(commands):
-            (_, since_novel_usage, neighbors,
-             position) = self.utilization[self.entries[prim_idx]]
-            new_neighbors = (None if i == 0 else commands[i - 1],
-                             None if i == len(commands) - 1 else commands[i +
-                                                                          1])
-            new_position = i
-            if neighbors == new_neighbors and position == new_position:
-                new_since_novel_usage = since_novel_usage + 1
-            else:
-                new_since_novel_usage = 0
-            self.utilization[self.entries[prim_idx]] = (0,
-                                                        new_since_novel_usage,
-                                                        new_neighbors,
-                                                        new_position)
-        refreshed = set(commands)
-        for j, prim in enumerate(self.entries):
-            if j not in refreshed:
-                (since_used, since_novel_usage, neighbors,
-                 position) = self.utilization[prim]
-                self.utilization[prim] = (since_used + 1, since_novel_usage,
-                                          neighbors, position)
-        return [
-            self.entries.index(prim)
-            for prim, (since_used, since_novel_usage, _,
-                       _) in self.utilization.items()
-            if since_used > self.idleness_limit
-            or since_novel_usage > self.idleness_limit
-        ]
-
-    def deduplicate_graphs(self):
-        return deduplicate(self.name_of_domain,
+    def deduplicate(self):
+        resp = deduplicate(self.name_of_domain,
                            self.executed_program_save_path)
+        best, redundant = resp["best"], resp["redundant"]
+        reduction = {}
+        for b, rs in zip(best, redundant):
+            reduction[b] = b
+            for r in rs:
+                reduction[r] = b
+        executed_programs = {}
+        for frozen_commands, hash in self.executed_programs.items():
+            filename = f"{hash}.json"
+            if filename in reduction:
+                executed_programs[frozen_commands] = reduction[filename][:-5]
+            else:
+                raise Exception("executed program was not accounted for by")
+        for rs in redundant:
+            for r in rs:
+                os.remove(os.path.join(self.executed_program_save_path, r))
+        self.executed_programs = executed_programs
+        return reduction
 
-    def visualize_graphs(self):
+    def visualize(self, to_visualize=None):
+        if to_visualize is None:
+            to_visualize = os.listdir(self.executed_program_save_path)
         named_graphs = {}
-        for fn in os.listdir(self.executed_program_save_path):
+        for fn in to_visualize:
             if fn.endswith(".json"):
                 with open(os.path.join(self.executed_program_save_path,
                                        fn)) as f:
@@ -278,24 +279,20 @@ class GraphQuantizer(nn.Module):
             if filename.endswith(".png"):
                 os.remove(os.path.join(self.visualization_save_path, filename))
 
-    def deduplicate_and_visualize(self):
-        deduplication_info = self.deduplicate_graphs()
-        self.clear_visualizations()
-        self.visualize_graphs()
-        return deduplication_info
-
     def compress(self,
+                 frontier,
                  next_dsl_name,
                  iterations=1,
                  beam_size=3,
                  top_i=3,
                  dsl_size_penalty=0.,
                  primitive_size_penalty=1.,
-                 n_beta_inversions=1,
+                 n_beta_inversions=2,
                  verbosity=0):
         next_dsl_file = os.path.join(self.dsl_save_path,
                                      f"{next_dsl_name}.json")
-        resp = compress(self.name_of_domain,
+        resp = compress(frontier,
+                        self.name_of_domain,
                         os.path.join(self.dsl_save_path,
                                      f"{self.dsl_name}.json"),
                         next_dsl_file,
@@ -308,3 +305,14 @@ class GraphQuantizer(nn.Module):
                         n_beta_inversions=n_beta_inversions,
                         verbosity=verbosity)
         return resp["rewritten"]
+
+
+class NullQuantizer:
+
+    loss = F.mse_loss
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def forward(self, *args, **kwargs):
+        pass

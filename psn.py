@@ -1,19 +1,26 @@
-from torch.nn import functional as F
-import torch.nn as nn
+import os
+
 import torch as th
+import torch.nn as nn
+from torch.nn import functional as F
+from torch.utils.data import DataLoader
+import numpy as np
+from tqdm import tqdm
 from einops import rearrange
+
+from restart_manager import RestartManager
 
 
 class PSN(nn.Module):
 
     def __init__(self,
-                 program_length,
                  out_codebook_size,
                  codebook_dim,
                  dsl_name,
                  pre_quantizer,
                  quantizer,
                  post_quantizer,
+                 program_length=None,
                  pre_quantizer_kwargs={},
                  quantizer_kwargs={},
                  post_quantizer_kwargs={},
@@ -31,14 +38,19 @@ class PSN(nn.Module):
         self.O = out_codebook_size
         self.out_codebook = self.initial_codebook(self.O, self.C)
 
-        self.P = 2
-        while self.P < program_length:
-            self.P *= 2
-        self.I = self.quantizer.dsl_size
+        if program_length is None:
+            self.P = self.E
+        else:
+            self.P = 2
+            while self.P < program_length:
+                self.P *= 2
+        self.I = self.quantizer.dsl_size if hasattr(
+            self.quantizer, "dsl_size") and program_length is not None else self.O
         self.in_codebook = self.initial_codebook(self.I,
                                                  (self.E // self.P) * self.C)
-
-        self.restarts = (None, [])
+        self.out_restart_manager = RestartManager(8, self.O, contextual=False)
+        self.in_restarts = (None, set())
+        self.out_restarts = (None, set())
         self.beta = beta
 
     def initial_codebook(self, size, dim):
@@ -48,13 +60,21 @@ class PSN(nn.Module):
         return codebook
 
     def forward(self, x, y, quantization_noise_std, mode):
-        assert (mode in ("nearest", "learned"))
+        assert (mode in ("none", "nearest", "learned"))
+        if mode == "none":
+            if self.in_restarts[0] is not None or len(self.in_restarts[1]) > 0:
+                self.in_restarts = (None, set())
+            if self.out_restarts[0] is not None or len(self.out_restarts[1]) > 0:
+                self.out_restarts = (None, set())
+            y = self.post_quantizer(self.pre_quantizer(x))
+            return (y, self.post_quantizer.loss(x, y), None, None)
         if mode == "nearest":
-            if self.restarts[0] is not None or len(self.restarts[1]) > 0:
-                self.restarts = (None, [])
+            if self.in_restarts[0] is not None or len(self.in_restarts[1]) > 0:
+                self.in_restarts = (None, set())
             latents = self.pre_quantizer(x)
             (quantized_latents_det, quantized_latents_noisy), _ = \
-                self.nearest_neighbors(latents, self.out_codebook, self.E, quantization_noise_std)
+                self.nearest_neighbors(
+                    latents, self.out_codebook, self.E, quantization_noise_std)
             out = self.post_quantizer(latents + (quantized_latents_noisy -
                                                  latents).detach())
             return (out,
@@ -63,22 +83,34 @@ class PSN(nn.Module):
                         y,
                         latents,
                         quantized_latents_det,
-                        quantized_latents_noisy=quantized_latents_noisy), None)
+                        quantized_latents_noisy=quantized_latents_noisy), None, None)
         elif mode == "learned":
             pg_in_latents = self.pre_quantizer(x)
             (quantized_pg_in_latents, ), (pg_in_encoding_inds, ) = \
                 self.nearest_neighbors(pg_in_latents,
-                    self.in_codebook, self.P, quantization_noise_std, noisy=False)
-            pg_out_latents, to_restart, programs = self.quantizer(
+                                       self.in_codebook, self.P, quantization_noise_std, noisy=False)
+            pg_out_latents, in_restarts, hashes, programs = self.quantizer(
                 pg_in_encoding_inds)
-            self.restarts = (rearrange(pg_in_latents.detach(),
-                                       "b (p r) c -> (b p) (r c)",
-                                       p=self.P,
-                                       r=(self.E // self.P),
-                                       c=self.C), to_restart)
-            (quantized_pg_out_latents_det, quantized_pg_out_latents_noisy), _ = \
+            self.in_restarts = (
+                rearrange(pg_in_latents.detach(),
+                          "b (p r) c -> (b p) (r c)",
+                          p=self.P,
+                          r=(self.E // self.P),
+                          c=self.C),
+                in_restarts)
+            (quantized_pg_out_latents_det, quantized_pg_out_latents_noisy), (_, pg_out_encoding_inds_noisy) = \
                 self.nearest_neighbors(pg_out_latents, self.out_codebook, self.E,
-                    quantization_noise_std)
+                                       quantization_noise_std)
+            out_restarts = set()
+            for cmds in pg_out_encoding_inds_noisy.tolist():
+                out_restarts.update(
+                    self.out_restart_manager.find_restarts(cmds))
+            self.out_restarts = (
+                rearrange(pg_in_latents.detach(),
+                          "b e c -> (b e) c",
+                          e=self.E,
+                          c=self.C),
+                out_restarts)
             out = self.post_quantizer(pg_in_latents +
                                       (quantized_pg_out_latents_noisy -
                                        pg_in_latents).detach())
@@ -88,17 +120,17 @@ class PSN(nn.Module):
                                                      r=(self.E // self.P),
                                                      c=self.C)
             loss = self.vqvae_loss(out,
-                             y,
-                             pg_in_latents,
-                             quantized_pg_out_latents_det,
-                             quantized_latents_noisy=quantized_pg_out_latents_noisy,
-                             delta=.33) + \
+                                   y,
+                                   pg_in_latents,
+                                   quantized_pg_out_latents_det,
+                                   quantized_latents_noisy=quantized_pg_out_latents_noisy,
+                                   delta=.33) + \
                 .33 * (self.non_recon_loss(pg_in_latents, quantized_pg_in_latents_slim) +
                        self.non_recon_loss(pg_out_latents,
                                            quantized_pg_out_latents_det,
                                            quantized_latents_noisy=quantized_pg_out_latents_noisy))
 
-            return out, loss, programs
+            return out, loss, hashes, programs
 
     def nearest_neighbors(self, latents, codebook, S, noise_std, noisy=True):
         K = codebook.weight.size(0)
@@ -166,19 +198,106 @@ class PSN(nn.Module):
             self.beta * F.mse_loss(latents, quantized_latents_det.detach()) +
             F.mse_loss(adjusted_quantized_latents, latents.detach()))
 
+    def run(self,
+            dataset,
+            batch_size,
+            n_epochs,
+            mode,
+            device,
+            quantization_noise_std=.5,
+            log_frequency=1,
+            optimizer=None,
+            shuffle=True,
+            train=True):
+        if train:
+            self.train()
+        else:
+            self.eval()
+        self.out_restart_manager.idleness_limit = batch_size * 3
+        if hasattr(self.quantizer, "restart_manager"):
+            self.quantizer.restart_manager.idleness_limit = batch_size * 3
+        if optimizer is not None:
+            self.optimizer = optimizer
+        elif not hasattr(self, "optimizer") or self.optimizer is None:
+            self.optimizer = th.optim.Adam(self.parameters())
+        dataloader = DataLoader(
+            dataset, batch_size=batch_size, shuffle=shuffle)
+        losses, diversity, n_elapsed, all_programs = 0, 0, 0, set()
+        steps_per_epoch = len(dataset) // batch_size
+        assert (steps_per_epoch * batch_size == len(dataset))
+        total_steps = n_epochs * steps_per_epoch
+        bar_format = "{bar}{r_bar} - " \
+                     "epoch: {postfix[0]:3.0f}, " \
+                     "loss: {postfix[1]:.4f}, " \
+                     "div.: {postfix[2]:.4f}, " \
+                     "tot. div.: {postfix[3]:.4f}"
+        postfix = [0, 0.0, float("NaN"), float("NaN")]
+        with tqdm(total=total_steps, bar_format=bar_format, postfix=postfix) as pbar:
+            for i, (x, y) in zip(range(total_steps), dataloader):
+                x, y = x.to(device), y.to(device)
+                _, loss, hashes, programs = self(
+                    x, y, quantization_noise_std, mode)
+                py_loss = loss.item()
+                losses += py_loss
+                n_elapsed += 1
+                if programs is not None:
+                    diversity += len(set(programs)) / len(programs)
+                    all_programs.update(programs)
+                if (i % steps_per_epoch) == 0:
+                    pbar.postfix[0] = (i % steps_per_epoch)
+                if (i % log_frequency) == 0:
+                    pbar.postfix[1] = (losses / n_elapsed)
+                    pbar.postfix[2] = (
+                        float("NaN") if programs is None else (diversity / n_elapsed))
+                    pbar.postfix[3] = (
+                        float("NaN") if programs is None else (len(all_programs) / total_steps))
+                    losses, diversity, n_elapsed = 0, 0, 0
+                pbar.update()
+                if train:
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+                    self.apply_restarts()
+                del (x, y, loss)
+                yield (py_loss, hashes, programs, all_programs)
+
     def apply_restarts(self):
-        starts, to_restart = self.restarts
+        starts, to_restart = self.in_restarts
         for r in to_restart:
             self.in_codebook.weight.data[r] = starts[th.randint(
                 starts.size(0), (1, ))]
+        self.in_restarts = (None, set())
+        starts, to_restart = self.out_restarts
+        for r in to_restart:
+            self.out_codebook.weight.data[r] = starts[th.randint(
+                starts.size(0), (1,))]
+        self.out_restarts = (None, set())
 
-    def compression(self, next_dsl_name, *args, **kwargs):
-        rewritten = self.quantizer.compress(next_dsl_name, *args, **kwargs)
+    def compression(self, dataset, batch_size, max_compressed, next_dsl_name, *args, **kwargs):
+        assignment = {}
+        for i, (_, hashes, _, _) in enumerate(
+                self.run(dataset, batch_size, 1,
+                         "learned", kwargs["device"],
+                         quantization_noise_std=0., shuffle=False,
+                         train=False)):
+            for j in range(i * batch_size, (i + 1) * batch_size):
+                assignment[j] = f"{hashes[j]}.json"
+        reduction = self.quantizer.deduplicate()
+        for j in assignment:
+            assignment[j] = reduction[assignment[j]]
+        frontier = list(assignment.values())
+        if len(frontier) > max_compressed:
+            frontier = np.random.choice(
+                frontier, max_compressed, replace=False).tolist()
+        self.quantizer.clear_visualizations()
+        self.quantizer.visualize(frontier)
+        rewritten = self.quantizer.compress(
+            frontier, next_dsl_name, *args, **kwargs)
         self.quantizer.load_dsl(next_dsl_name)
         self.I = self.quantizer.dsl_size
         in_codebook = self.initial_codebook(self.I,
                                             (self.E // self.P) * self.C)
         in_codebook.weight.data[1:] = self.in_codebook.weight.data
         self.in_codebook = in_codebook
-        self.restarts = (None, [])
+        self.in_restarts, self.out_restarts = (None, set()), (None, set())
         return rewritten

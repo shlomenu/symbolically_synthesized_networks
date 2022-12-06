@@ -20,7 +20,8 @@ def deduplicate(domain, executed_programs_dir):
     })
 
 
-def compress(domain,
+def compress(frontier,
+             domain,
              dsl_file,
              next_dsl_file,
              executed_programs_dir,
@@ -33,6 +34,7 @@ def compress(domain,
              n_cores=1,
              verbosity=0):
     json_msg = {
+        "frontier": frontier,
         "domain": domain,
         "dsl_file": dsl_file,
         "next_dsl_file": next_dsl_file,
