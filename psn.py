@@ -11,6 +11,19 @@ from einops import rearrange
 from restart_manager import RestartManager
 
 
+class TqdmExtraFormat(tqdm):
+
+    def __init__(self, *args, extras={}, **kwargs):
+        self.extras = extras
+        super().__init__(*args, **kwargs)
+
+    @property
+    def format_dict(self):
+        d = super().format_dict
+        d.update(**self.extras)
+        return d
+
+
 class PSN(nn.Module):
 
     def __init__(self,
@@ -59,7 +72,7 @@ class PSN(nn.Module):
         codebook.weight.data -= codebook.weight.data.mean(dim=0)
         return codebook
 
-    def forward(self, x, y, quantization_noise_std, mode):
+    def forward(self, x, y, quantization_noise_std, mode, always_cache=False):
         assert (mode in ("none", "nearest", "learned"))
         if mode == "none":
             if self.in_restarts[0] is not None or len(self.in_restarts[1]) > 0:
@@ -90,7 +103,7 @@ class PSN(nn.Module):
                 self.nearest_neighbors(pg_in_latents,
                                        self.in_codebook, self.P, quantization_noise_std, noisy=False)
             pg_out_latents, in_restarts, hashes, programs = self.quantizer(
-                pg_in_encoding_inds)
+                pg_in_encoding_inds, always_cache=always_cache)
             self.in_restarts = (
                 rearrange(pg_in_latents.detach(),
                           "b (p r) c -> (b p) (r c)",
@@ -205,10 +218,11 @@ class PSN(nn.Module):
             mode,
             device,
             quantization_noise_std=.5,
-            log_frequency=1,
+            alpha=.8,
             optimizer=None,
             shuffle=True,
-            train=True):
+            train=True,
+            always_cache=False):
         if train:
             self.train()
         else:
@@ -222,36 +236,37 @@ class PSN(nn.Module):
             self.optimizer = th.optim.Adam(self.parameters())
         dataloader = DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle)
-        losses, diversity, n_elapsed, all_programs = 0, 0, 0, set()
+        smoothed_loss, smoothed_diversity, all_programs = 0, 0, set()
         steps_per_epoch = len(dataset) // batch_size
         assert (steps_per_epoch * batch_size == len(dataset))
         total_steps = n_epochs * steps_per_epoch
         bar_format = "{bar}{r_bar} - " \
-                     "epoch: {postfix[0]:3.0f}, " \
-                     "loss: {postfix[1]:.4f}, " \
-                     "div.: {postfix[2]:.4f}, " \
-                     "tot. div.: {postfix[3]:.4f}"
-        postfix = [0, 0.0, float("NaN"), float("NaN")]
-        with tqdm(total=total_steps, bar_format=bar_format, postfix=postfix) as pbar:
+                     "epoch: {epoch:3.0f}, " \
+                     "loss: {smoothed_loss:.4f}, " \
+                     "div.: {smoothed_div:.4f}, " \
+                     "tot. div.: {tot_div:.4f}"
+        extras = {"epoch": 0, "smoothed_loss": 0.0,
+                  "smoothed_div": float("NaN"), "tot_div": float("NaN")}
+        with TqdmExtraFormat(total=total_steps, bar_format=bar_format, extras=extras) as pbar:
             for i, (x, y) in zip(range(total_steps), dataloader):
                 x, y = x.to(device), y.to(device)
                 _, loss, hashes, programs = self(
-                    x, y, quantization_noise_std, mode)
+                    x, y, quantization_noise_std, mode, always_cache=always_cache)
                 py_loss = loss.item()
-                losses += py_loss
-                n_elapsed += 1
+                smoothed_loss = alpha * py_loss + (1 - alpha) * smoothed_loss
                 if programs is not None:
-                    diversity += len(set(programs)) / len(programs)
+                    smoothed_diversity = alpha * \
+                        (len(set(programs)) / len(programs)) + \
+                        (1 - alpha) * smoothed_diversity
                     all_programs.update(programs)
                 if (i % steps_per_epoch) == 0:
-                    pbar.postfix[0] = (i % steps_per_epoch)
-                if (i % log_frequency) == 0:
-                    pbar.postfix[1] = (losses / n_elapsed)
-                    pbar.postfix[2] = (
-                        float("NaN") if programs is None else (diversity / n_elapsed))
-                    pbar.postfix[3] = (
-                        float("NaN") if programs is None else (len(all_programs) / total_steps))
-                    losses, diversity, n_elapsed = 0, 0, 0
+                    pbar.extras["epoch"] = (i % steps_per_epoch)
+                pbar.extras["smoothed_loss"] = smoothed_loss
+                pbar.extras["smoothed_div"] = (
+                    float("NaN") if programs is None else smoothed_diversity)
+                pbar.extras["tot_div"] = (
+                    float("NaN") if programs is None else (
+                        len(all_programs) / (max(i * batch_size, 1.))))
                 pbar.update()
                 if train:
                     self.optimizer.zero_grad()
@@ -273,15 +288,15 @@ class PSN(nn.Module):
                 starts.size(0), (1,))]
         self.out_restarts = (None, set())
 
-    def compression(self, dataset, batch_size, max_compressed, next_dsl_name, *args, **kwargs):
+    def compression(self, dataset, batch_size, max_compressed, next_dsl_name, device, *args, **kwargs):
         assignment = {}
         for i, (_, hashes, _, _) in enumerate(
                 self.run(dataset, batch_size, 1,
-                         "learned", kwargs["device"],
+                         "learned", device,
                          quantization_noise_std=0., shuffle=False,
-                         train=False)):
-            for j in range(i * batch_size, (i + 1) * batch_size):
-                assignment[j] = f"{hashes[j]}.json"
+                         train=False, always_cache=True)):
+            for j, hash in zip(range(i * batch_size, (i + 1) * batch_size), hashes):
+                assignment[j] = f"{hash}.json"
         reduction = self.quantizer.deduplicate()
         for j in assignment:
             assignment[j] = reduction[assignment[j]]

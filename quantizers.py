@@ -39,7 +39,7 @@ def node_tensor_tuple_of_json(graph_json):
 
 def node_colors_of_json(graph_json, device):
     colors = th.zeros(len(graph_json["nodes"]),
-                      graph_json["max_node_color"],
+                      graph_json["max_color"],
                       device=device)
     for [node_id, color] in graph_json["nodes"]:
         colors[node_id, color] = 1
@@ -99,9 +99,9 @@ class GraphQuantizer(nn.Module):
                  heads=2,
                  depth=1,
                  idleness_limit=8,
-                 max_node_color=8):
+                 max_color=10):
         super().__init__()
-        self.max_node_color = max_node_color
+        self.max_color = max_color
         self.name_of_domain = "graph"
         self.executed_program_save_path = os.path.join(self.name_of_domain,
                                                        EXECUTED_PROGRAMS_DIR)
@@ -113,7 +113,7 @@ class GraphQuantizer(nn.Module):
         self.load_dsl(dsl_name)
         self.restart_manager = RestartManager(
             idleness_limit, len(self.entries), contextual=True)
-        self.attn_up = dgl.nn.GATv2Conv(in_feats=self.max_node_color,
+        self.attn_up = dgl.nn.GATv2Conv(in_feats=self.max_color,
                                         out_feats=C,
                                         num_heads=1,
                                         attn_drop=0.5)
@@ -147,9 +147,9 @@ class GraphQuantizer(nn.Module):
         self.pool = dgl.nn.GlobalAttentionPooling(nn.Linear(E * C, 1))
         self.to_out = nn.Sequential(*[nn.Unflatten(1, (E, C)), nn.Tanh()])
 
-    def forward(self, commands):
+    def forward(self, commands, always_cache=False):
         graphs, feats, restarts, hashes, programs = self.execute_commands(
-            commands.tolist(), commands.device)
+            commands.tolist(), commands.device, always_cache)
         feats = rearrange(self.attn_up(graphs, feats), "n ... -> n (...)")
         for attn, ff in zip(self.attns, self.ffs):
             feats = ff(attn(graphs, feats))
@@ -168,19 +168,22 @@ class GraphQuantizer(nn.Module):
                                f"{self.dsl_name}.json")) as f:
             dsl = json.load(f)
         entries = tuple(ent["name"] for ent in dsl["library"])
-        ent_to_ind = {v: k for k, v in enumerate(entries)}
-        ind_to_ind = {k: ent_to_ind[v]
-                      for k, v in enumerate(self.entries)}
-        self.entries, executed_programs = entries, {}
-        for frozen_commands, hash in self.executed_programs.items():
-            executed_programs[tuple(ind_to_ind[code] for code in frozen_commands)] = \
-                hash
-        self.executed_programs = executed_programs
+        if hasattr(self, "entries"):
+            ent_to_ind = {v: k for k, v in enumerate(entries)}
+            ind_to_ind = {k: ent_to_ind[v]
+                          for k, v in enumerate(self.entries)}
+            executed_programs = {}
+            for frozen_commands, hash in self.executed_programs.items():
+                executed_programs[tuple(ind_to_ind[code] for code in frozen_commands)] = \
+                    hash
+            self.executed_programs = executed_programs
+        self.entries = entries
 
-    def execute_commands(self, commands: List[List[int]], device):
+    def execute_commands(self, commands: List[List[int]], device, always_cache):
         graphs, feats, restarts, hashes, programs = [], [], set(), [], []
         for cmds in commands:
-            graph, feat, hash, program = self._execute_commands(cmds, device)
+            graph, feat, hash, program = self._execute_commands(
+                cmds, device, always_cache)
             restarts.update(self.restart_manager.find_restarts(cmds))
             graphs.append(graph)
             feats.append(feat)
@@ -189,7 +192,7 @@ class GraphQuantizer(nn.Module):
         return dgl.batch(graphs), th.cat(feats,
                                          dim=0), restarts, hashes, programs
 
-    def _execute_commands(self, commands: List[int], device):
+    def _execute_commands(self, commands: List[int], device, always_cache):
         frozen_commands = tuple(commands)
         if frozen_commands in self.executed_programs:
             new = False
@@ -205,9 +208,9 @@ class GraphQuantizer(nn.Module):
                     "attempts":
                     1,
                     "eval_timeout":
-                    .01,
-                    "max_node_color":
-                    self.max_node_color,
+                    .1,
+                    "max_color":
+                    self.max_color,
                     "commands":
                     commands,
                     "domain":
@@ -216,14 +219,17 @@ class GraphQuantizer(nn.Module):
                     os.path.join(self.name_of_domain, DSL_DIR,
                                  f"{self.dsl_name}.json")
                 })
-            hashf = blake2b(digest_size=15)
-            hashf.update(bytes(resp["original"], encoding="utf-8"))
-            hash = hashf.hexdigest()
-            self.executed_programs[frozen_commands] = hash
-            with open(
-                    os.path.join(self.executed_program_save_path,
-                                 f"{hash}.json"), "w") as f:
-                f.write(json.dumps(resp))
+            if self.training or always_cache:
+                hashf = blake2b(digest_size=15)
+                hashf.update(bytes(resp["original"], encoding="utf-8"))
+                hash = hashf.hexdigest()
+                self.executed_programs[frozen_commands] = hash
+                with open(
+                        os.path.join(self.executed_program_save_path,
+                                     f"{hash}.json"), "w") as f:
+                    f.write(json.dumps(resp))
+            else:
+                hash = None
         if not resp["translated"]:
             print(
                 f"WARNING: commands_to_program failed to produce program: {'new' if new else 'reused'}: {hash}"
@@ -238,7 +244,8 @@ class GraphQuantizer(nn.Module):
 
     def deduplicate(self):
         resp = deduplicate(self.name_of_domain,
-                           self.executed_program_save_path)
+                           self.executed_program_save_path,
+                           max_color=self.max_color)
         best, redundant = resp["best"], resp["redundant"]
         reduction = {}
         for b, rs in zip(best, redundant):
@@ -303,7 +310,8 @@ class GraphQuantizer(nn.Module):
                         dsl_size_penalty=dsl_size_penalty,
                         primitive_size_penalty=primitive_size_penalty,
                         n_beta_inversions=n_beta_inversions,
-                        verbosity=verbosity)
+                        verbosity=verbosity,
+                        max_color=self.max_color)
         return resp["rewritten"]
 
 

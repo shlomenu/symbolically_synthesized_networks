@@ -13,11 +13,13 @@ EXECUTE_BINARY_LOC = "program_synthesis/_build/default/execute.exe"
 COMPRESS_BINARY_LOC = "program_synthesis/_build/default/compress.exe"
 
 
-def deduplicate(domain, executed_programs_dir):
-    return invoke_binary_with_json(DEDUPLICATE_BINARY_LOC, {
+def deduplicate(domain, executed_programs_dir, **kwargs):
+    json_msg = {
         "executed_programs_dir": executed_programs_dir,
         "domain": domain
-    })
+    }
+    json_msg.update(kwargs)
+    return invoke_binary_with_json(DEDUPLICATE_BINARY_LOC, json_msg)
 
 
 def compress(frontier,
@@ -32,7 +34,8 @@ def compress(frontier,
              primitive_size_penalty=1.,
              n_beta_inversions=3,
              n_cores=1,
-             verbosity=0):
+             verbosity=0,
+             **kwargs):
     json_msg = {
         "frontier": frontier,
         "domain": domain,
@@ -48,6 +51,7 @@ def compress(frontier,
         "n_cores": n_cores,
         "verbosity": verbosity
     }
+    json_msg.update(kwargs)
     return invoke_binary_with_json(COMPRESS_BINARY_LOC, json_msg)
 
 
