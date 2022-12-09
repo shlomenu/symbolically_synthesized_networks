@@ -25,23 +25,30 @@ let (_ : unit) =
     SU.to_number @@ SU.member "primitive_size_penalty" j
   in
   let n_beta_inversions = SU.to_int @@ SU.member "n_beta_inversions" j in
-  let n_cores = SU.to_int @@ SU.member "n_cores" j in
   let parse = Domains.parser_of_domain domain j in
-  let executed_programs_dir =
-    SU.to_string @@ SU.member "executed_programs_dir" j
+  let representations_dir = SU.to_string @@ SU.member "representations_dir" j in
+  let frontier, _, _ =
+    load_representations_from parse representations_dir frontier
   in
-  let programs, paths, file_contents =
-    load_frontier_from parse executed_programs_dir frontier
+  let all_programs, paths, file_contents =
+    load_representations_from parse representations_dir
+    @@ Caml.Sys.readdir representations_dir
   in
   let verbose = SU.to_int @@ SU.member "verbosity" j in
   compression_verbosity := verbose ;
-  let dsl', programs' =
-    compress ~inlining:true ~iterations ~n_cores ~primitive_size_penalty
+  let dsl', all_programs' =
+    compress ~inlining:true ~iterations ~primitive_size_penalty
       ~dsl_size_penalty ~n_beta_inversions ~top_i ~beam_size
-      (request_of_domain domain) dsl programs
+      ~request:(request_of_domain domain) ~dsl ~all_programs ~frontier
   in
   if List.length dsl'.library > List.length dsl.library then (
     S.to_file next_dsl_file @@ yojson_of_dsl dsl' ;
-    overwrite_frontier programs' paths file_contents ;
-    S.to_channel Out_channel.stdout (`Assoc [("rewritten", `Bool true)]) )
+    let prev_files, cur_files =
+      overwrite_representations all_programs' paths file_contents
+    in
+    S.to_channel Out_channel.stdout
+      (`Assoc
+        [ ("rewritten", `Bool true)
+        ; ("prev_files", yojson_of_list yojson_of_string prev_files)
+        ; ("cur_files", yojson_of_list yojson_of_string cur_files) ] ) )
   else S.to_channel Out_channel.stdout @@ `Assoc [("rewritten", `Bool false)]

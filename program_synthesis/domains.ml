@@ -1,15 +1,9 @@
 open Core
 module Graph = Antireduce_graphs
 
-let execute_and_save = function
+let explore = function
   | "graph" ->
-      Graph.execute_and_save
-  | name_of_domain ->
-      failwith @@ Format.sprintf "unrecognized domain: %s" name_of_domain
-
-let find_duplicates = function
-  | "graph" ->
-      Graph.find_duplicates
+      Graph.explore
   | name_of_domain ->
       failwith @@ Format.sprintf "unrecognized domain: %s" name_of_domain
 

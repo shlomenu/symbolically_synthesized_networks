@@ -1,5 +1,5 @@
 (executables
- (names execute deduplicate compress)
+ (names explore compress)
  (modes native)
  (libraries core antireduce antireduce_graphs)
  (preprocess
