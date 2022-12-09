@@ -169,6 +169,8 @@ class GraphQuantizer(nn.Module):
             dsl = json.load(f)
         entries = tuple(ent["name"] for ent in dsl["library"])
         if hasattr(self, "entries"):
+            for code in range(len(entries)):
+                self.restart_manager.add_code(code)
             ent_to_ind = {v: k for k, v in enumerate(entries)}
             ind_to_ind = {k: ent_to_ind[v]
                           for k, v in enumerate(self.entries)}

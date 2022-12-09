@@ -7,8 +7,6 @@ from torchvision.io import read_image
 import numpy as np
 from tqdm import trange
 import pickle
-import math
-import random
 from copy import deepcopy
 
 
@@ -64,59 +62,8 @@ class RavenDataset(Dataset):
     def rpm(self, i):
         instance, _, _ = self.multi_indices[i]
         filename = f"rpm_{instance}.pkl"
-        with open(os.path.join(self.pkl_dir, filename)) as f:
+        with open(os.path.join(self.pkl_dir, filename), "rb") as f:
             return pickle.load(f)
-
-    @staticmethod
-    def sel_rand(k, n_items):
-        x_indices = sorted(np.random.choice(
-            n_items, size=k, replace=False))
-        y_indices, j = [], 0
-        for i in range(n_items):
-            if i == x_indices[j]:
-                j += 1
-            else:
-                y_indices.append(i)
-        return x_indices, y_indices
-
-    @classmethod
-    def trisplit(cls, dataset_dir, val_prop, test_prop, load_correct=True, load_incorrect=False):
-        """
-        Creates (train, test, val) split of all data under dataset_dir.  The test instances are 
-        enumerated from the end of the sorted list of multi-indices, which dependent only on the names
-        of the files not the order in which the operating system displays files.  Among the remaining, 
-        the validation set is chosen randomly.  The proportion of test data is interpreted as a 
-        proportion of the total; the proportion of validation data is interpreted as the proportion of 
-        what remains after test data is set aside.  To perform K-fold cross validation with leftover test 
-        data, for example, you would use `val_prop=.33`, not `val_prop=(.33 * (1 - test_prop)).  Correct
-        and incorrect versions of the same puzzle are always grouped together within each subdivision of
-        the data.  
-        """
-        assert (0. < val_prop and val_prop <
-                1. and 0. < test_prop and test_prop < 1.)
-        dataset = cls(dataset_dir, load_correct=load_correct,
-                      load_incorrect=load_incorrect)
-        multi_indices = deepcopy(dataset.multi_indices)
-        del dataset.multi_indices[:]
-        train, val, test = deepcopy(dataset), deepcopy(
-            dataset), deepcopy(dataset)
-        n_instances = len(
-            {instance for (instance, _, _) in multi_indices})
-        puzzles_per_instance = len(multi_indices) // n_instances
-        assert (n_instances * puzzles_per_instance == len(multi_indices))
-        n_test_instances = math.ceil(test_prop * n_instances)
-        n_train_val_instances = n_instances = n_test_instances
-        test_split = -(n_test_instances * puzzles_per_instance)
-        test.multi_indices = deepcopy(multi_indices[test_split:])
-        val_instances_idx, train_instances_idx = cls.sel_rand(
-            math.ceil(val_prop * n_train_val_instances), n_train_val_instances)
-        for i in val_instances_idx:
-            val.multi_indices.extend(
-                multi_indices[i * puzzles_per_instance:(i + 1) * puzzles_per_instance])
-        for i in train_instances_idx:
-            train.multi_indices.extend(
-                multi_indices[i * puzzles_per_instance:(i + 1) * puzzles_per_instance])
-        return train, val, test
 
     @classmethod
     def multisplit(cls, dataset_dir, batch_size, batches_per_portion, load_correct=True, load_incorrect=False):
@@ -131,13 +78,13 @@ class RavenDataset(Dataset):
         puzzles_per_instance = len(dataset) // n_instances
         assert ((batch_size % puzzles_per_instance) == 0)
         instances_per_batch = batch_size // puzzles_per_instance
-        assert ((n_instances % (batches_per_portion * instances_per_batch)) == 0)
         instances_per_portion = batches_per_portion * instances_per_batch
         n_portions = n_instances // instances_per_portion
+        n_used: int = n_portions * instances_per_portion
         multi_indices = deepcopy(dataset.multi_indices)
         del dataset.multi_indices[:]
         portions = [deepcopy(dataset) for _ in range(n_portions)]
-        for i, inst in enumerate(np.random.choice(n_instances, n_instances, replace=False)):
+        for i, inst in enumerate(np.random.choice(n_instances, n_used, replace=False)):
             portions[i // instances_per_portion].multi_indices.extend(
                 multi_indices[inst * puzzles_per_instance:(inst + 1) * puzzles_per_instance])
         for portion in portions:

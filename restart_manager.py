@@ -11,6 +11,12 @@ class RestartManager:
         else:
             self.utilization = {code: 0 for code in range(K)}
 
+    def add_code(self, code):
+        if hasattr(self, "contextual_utilization") and code not in self.contextual_utilization:
+            self.contextual_utilization[code] = (0, 0, (None, None), 0)
+        elif hasattr(self, "utilization") and code not in self.utilization:
+            self.utilization[code] = 0
+
     def find_restarts(self, commands: List[int]):
         if self.contextual:
             for i, code in enumerate(commands):

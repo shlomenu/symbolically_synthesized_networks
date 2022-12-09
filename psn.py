@@ -136,12 +136,11 @@ class PSN(nn.Module):
                                    y,
                                    pg_in_latents,
                                    quantized_pg_out_latents_det,
-                                   quantized_latents_noisy=quantized_pg_out_latents_noisy,
-                                   delta=.33) + \
-                .33 * (self.non_recon_loss(pg_in_latents, quantized_pg_in_latents_slim) +
-                       self.non_recon_loss(pg_out_latents,
-                                           quantized_pg_out_latents_det,
-                                           quantized_latents_noisy=quantized_pg_out_latents_noisy))
+                                   quantized_latents_noisy=quantized_pg_out_latents_noisy) + \
+                (self.non_recon_loss(pg_in_latents, quantized_pg_in_latents_slim) +
+                 self.non_recon_loss(pg_out_latents,
+                                     quantized_pg_out_latents_det,
+                                     quantized_latents_noisy=quantized_pg_out_latents_noisy))
 
             return out, loss, hashes, programs
 
@@ -237,8 +236,8 @@ class PSN(nn.Module):
         dataloader = DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle)
         smoothed_loss, smoothed_diversity, all_programs = 0, 0, set()
+        assert ((len(dataset) % batch_size) == 0)
         steps_per_epoch = len(dataset) // batch_size
-        assert (steps_per_epoch * batch_size == len(dataset))
         total_steps = n_epochs * steps_per_epoch
         bar_format = "{bar}{r_bar} - " \
                      "epoch: {epoch:3.0f}, " \
@@ -247,8 +246,14 @@ class PSN(nn.Module):
                      "tot. div.: {tot_div:.4f}"
         extras = {"epoch": 0, "smoothed_loss": 0.0,
                   "smoothed_div": float("NaN"), "tot_div": float("NaN")}
+        data_iterator = iter(dataloader)
         with TqdmExtraFormat(total=total_steps, bar_format=bar_format, extras=extras) as pbar:
-            for i, (x, y) in zip(range(total_steps), dataloader):
+            for i in range(1, total_steps + 1):
+                try:
+                    x, y = next(data_iterator)
+                except StopIteration:
+                    data_iterator = iter(dataloader)
+                    x, y = next(data_iterator)
                 x, y = x.to(device), y.to(device)
                 _, loss, hashes, programs = self(
                     x, y, quantization_noise_std, mode, always_cache=always_cache)
@@ -259,14 +264,13 @@ class PSN(nn.Module):
                         (len(set(programs)) / len(programs)) + \
                         (1 - alpha) * smoothed_diversity
                     all_programs.update(programs)
-                if (i % steps_per_epoch) == 0:
-                    pbar.extras["epoch"] = (i % steps_per_epoch)
+                pbar.extras["epoch"] = (i // steps_per_epoch)
                 pbar.extras["smoothed_loss"] = smoothed_loss
                 pbar.extras["smoothed_div"] = (
                     float("NaN") if programs is None else smoothed_diversity)
                 pbar.extras["tot_div"] = (
                     float("NaN") if programs is None else (
-                        len(all_programs) / (max(i * batch_size, 1.))))
+                        len(all_programs) / (i * batch_size)))
                 pbar.update()
                 if train:
                     self.optimizer.zero_grad()
@@ -288,7 +292,7 @@ class PSN(nn.Module):
                 starts.size(0), (1,))]
         self.out_restarts = (None, set())
 
-    def compression(self, dataset, batch_size, max_compressed, next_dsl_name, device, *args, **kwargs):
+    def compression(self, dataset, batch_size, max_compressed, next_dsl_name, device, **kwargs):
         assignment = {}
         for i, (_, hashes, _, _) in enumerate(
                 self.run(dataset, batch_size, 1,
@@ -307,12 +311,16 @@ class PSN(nn.Module):
         self.quantizer.clear_visualizations()
         self.quantizer.visualize(frontier)
         rewritten = self.quantizer.compress(
-            frontier, next_dsl_name, *args, **kwargs)
-        self.quantizer.load_dsl(next_dsl_name)
-        self.I = self.quantizer.dsl_size
-        in_codebook = self.initial_codebook(self.I,
-                                            (self.E // self.P) * self.C)
-        in_codebook.weight.data[1:] = self.in_codebook.weight.data
-        self.in_codebook = in_codebook
-        self.in_restarts, self.out_restarts = (None, set()), (None, set())
+            frontier, next_dsl_name, **kwargs)
+        if rewritten:
+            self.quantizer.load_dsl(next_dsl_name)
+            self.I = self.quantizer.dsl_size
+            in_codebook = self.initial_codebook(self.I,
+                                                (self.E // self.P) * self.C).to(
+                                                    self.in_codebook.weight.device)
+            in_codebook.weight.data[1:] = self.in_codebook.weight.data
+            self.in_codebook = in_codebook
+            for code in range(self.I):
+                self.out_restart_manager.add_code(code)
+            self.in_restarts, self.out_restarts = (None, set()), (None, set())
         return rewritten
