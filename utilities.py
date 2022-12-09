@@ -8,32 +8,42 @@ import time
 import torch as th
 from torchvision.utils import save_image
 
-DEDUPLICATE_BINARY_LOC = "program_synthesis/_build/default/deduplicate.exe"
-EXECUTE_BINARY_LOC = "program_synthesis/_build/default/execute.exe"
+EXPLORE_BINARY_LOC = "program_synthesis/_build/default/explore.exe"
 COMPRESS_BINARY_LOC = "program_synthesis/_build/default/compress.exe"
 
 
-def deduplicate(domain, executed_programs_dir, **kwargs):
+def explore(domain,
+            dsl_file,
+            representations_dir,
+            exploration_timeout,
+            program_size,
+            eval_timeout=.1,
+            attempts=1,
+            **kwargs):
     json_msg = {
-        "executed_programs_dir": executed_programs_dir,
-        "domain": domain
+        "domain": domain,
+        "dsl_file": dsl_file,
+        "representations_dir": representations_dir,
+        "exploration_timeout": exploration_timeout,
+        "program_size": program_size,
+        "eval_timeout": eval_timeout,
+        "attempts": attempts
     }
     json_msg.update(kwargs)
-    return invoke_binary_with_json(DEDUPLICATE_BINARY_LOC, json_msg)
+    return invoke_binary_with_json(EXPLORE_BINARY_LOC, json_msg)
 
 
 def compress(frontier,
              domain,
              dsl_file,
              next_dsl_file,
-             executed_programs_dir,
+             representations_dir,
              iterations=1,
              beam_size=3,
              top_i=3,
              dsl_size_penalty=0.,
              primitive_size_penalty=1.,
              n_beta_inversions=3,
-             n_cores=1,
              verbosity=0,
              **kwargs):
     json_msg = {
@@ -41,14 +51,13 @@ def compress(frontier,
         "domain": domain,
         "dsl_file": dsl_file,
         "next_dsl_file": next_dsl_file,
-        "executed_programs_dir": executed_programs_dir,
+        "representations_dir": representations_dir,
         "iterations": iterations,
         "beam_size": beam_size,
         "top_i": top_i,
         "dsl_size_penalty": dsl_size_penalty,
         "primitive_size_penalty": primitive_size_penalty,
         "n_beta_inversions": n_beta_inversions,
-        "n_cores": n_cores,
         "verbosity": verbosity
     }
     json_msg.update(kwargs)

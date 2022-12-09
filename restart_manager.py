@@ -41,13 +41,13 @@ class RestartManager:
                      position) = self.contextual_utilization[code]
                     self.contextual_utilization[code] = (since_used + 1, since_novel_usage + 1,
                                                          neighbors, position)
-            return [
+            return set(
                 code
                 for code, (since_used, since_novel_usage, _,
                            _) in self.contextual_utilization.items()
                 if since_used > self.idleness_limit
                 or since_novel_usage > self.idleness_limit
-            ]
+            )
         else:
             for code in commands:
                 self.utilization[code] = 0
@@ -55,7 +55,7 @@ class RestartManager:
             for code in range(self.K):
                 if code not in refreshed:
                     self.utilization[code] = self.utilization[code] + 1
-            return [
+            return set(
                 code for code, since_used in self.utilization.items()
                 if since_used > self.idleness_limit
-            ]
+            )

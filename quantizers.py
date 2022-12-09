@@ -12,11 +12,11 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 
 from restart_manager import RestartManager
-from utilities import (EXECUTE_BINARY_LOC, COLORS, compress,
-                       invoke_binary_with_json, deduplicate)
+from utilities import (EXPLORE_BINARY_LOC, COLORS, explore,
+                       compress, invoke_binary_with_json)
 
 DSL_DIR = "dsls"
-EXECUTED_PROGRAMS_DIR = "executed_programs"
+REPRESENTATIONS_DIR = "representations"
 VISUALIZATION_DIR = "visualizations"
 
 
@@ -103,16 +103,17 @@ class GraphQuantizer(nn.Module):
         super().__init__()
         self.max_color = max_color
         self.name_of_domain = "graph"
-        self.executed_program_save_path = os.path.join(self.name_of_domain,
-                                                       EXECUTED_PROGRAMS_DIR)
+        self.representations_save_path = os.path.join(self.name_of_domain,
+                                                      REPRESENTATIONS_DIR)
         self.dsl_save_path = os.path.join(self.name_of_domain, DSL_DIR)
         self.visualization_save_path = os.path.join(self.name_of_domain,
                                                     VISUALIZATION_DIR)
-        self.timed_out = set()
-        self.executed_programs = {}
-        self.load_dsl(dsl_name)
+
+        self.dsl_name = dsl_name
+        self.representations = sorted(
+            os.listdir(self.representations_save_path))
         self.restart_manager = RestartManager(
-            idleness_limit, len(self.entries), contextual=True)
+            idleness_limit, len(self.representations), contextual=True)
         self.attn_up = dgl.nn.GATv2Conv(in_feats=self.max_color,
                                         out_feats=C,
                                         num_heads=1,
@@ -147,150 +148,54 @@ class GraphQuantizer(nn.Module):
         self.pool = dgl.nn.GlobalAttentionPooling(nn.Linear(E * C, 1))
         self.to_out = nn.Sequential(*[nn.Unflatten(1, (E, C)), nn.Tanh()])
 
-    def forward(self, commands, always_cache=False):
-        graphs, feats, restarts, hashes, programs = self.execute_commands(
-            commands.tolist(), commands.device, always_cache)
+    def __len__(self):
+        return len(self.representations)
+
+    def forward(self, selections):
+        graphs, feats, restarts, filenames = self._fetch(
+            selections.tolist(), selections.device)
         feats = rearrange(self.attn_up(graphs, feats), "n ... -> n (...)")
         for attn, ff in zip(self.attns, self.ffs):
             feats = ff(attn(graphs, feats))
         return self.to_out(
             self.pool(graphs,
                       self.ff_seq(self.attn_seq(graphs,
-                                                feats)))), restarts, hashes, programs
+                                                feats)))), restarts, filenames
 
-    @property
-    def dsl_size(self):
-        return len(self.entries)
-
-    def load_dsl(self, dsl_name):
-        self.dsl_name = dsl_name
-        with open(os.path.join(self.dsl_save_path,
-                               f"{self.dsl_name}.json")) as f:
-            dsl = json.load(f)
-        entries = tuple(ent["name"] for ent in dsl["library"])
-        if hasattr(self, "entries"):
-            for code in range(len(entries)):
-                self.restart_manager.add_code(code)
-            ent_to_ind = {v: k for k, v in enumerate(entries)}
-            ind_to_ind = {k: ent_to_ind[v]
-                          for k, v in enumerate(self.entries)}
-            executed_programs = {}
-            for frozen_commands, hash in self.executed_programs.items():
-                executed_programs[tuple(ind_to_ind[code] for code in frozen_commands)] = \
-                    hash
-            self.executed_programs = executed_programs
-        self.entries = entries
-
-    def execute_commands(self, commands: List[List[int]], device, always_cache):
-        graphs, feats, restarts, hashes, programs = [], [], set(), [], []
-        for cmds in commands:
-            graph, feat, hash, program = self._execute_commands(
-                cmds, device, always_cache)
-            restarts.update(self.restart_manager.find_restarts(cmds))
+    def _fetch(self, selections: List[int], device):
+        restarts = self.restart_manager.find_restarts(selections)
+        graphs, feats, filenames = [], [], []
+        for selection in selections:
+            filename = self.representations[selection]
+            with open(os.path.join(self.representations_save_path, filename)) as f:
+                repr = json.load(f)
+            graph, feat = dgl_homograph_of_json(repr["output"], device)
             graphs.append(graph)
             feats.append(feat)
-            hashes.append(hash)
-            programs.append(program)
-        return dgl.batch(graphs), th.cat(feats,
-                                         dim=0), restarts, hashes, programs
+            filenames.append(filename)
+        return dgl.batch(graphs), th.cat(feats, dim=0), restarts, filenames
 
-    def _execute_commands(self, commands: List[int], device, always_cache):
-        frozen_commands = tuple(commands)
-        if frozen_commands in self.executed_programs:
-            new = False
-            hash = self.executed_programs[frozen_commands]
-            with open(
-                    os.path.join(self.executed_program_save_path,
-                                 f"{hash}.json")) as f:
-                resp = json.load(f)
-        else:
-            new = True
-            resp = invoke_binary_with_json(
-                EXECUTE_BINARY_LOC, {
-                    "attempts":
-                    1,
-                    "eval_timeout":
-                    .1,
-                    "max_color":
-                    self.max_color,
-                    "commands":
-                    commands,
-                    "domain":
-                    self.name_of_domain,
-                    "dsl_file":
-                    os.path.join(self.name_of_domain, DSL_DIR,
-                                 f"{self.dsl_name}.json")
-                })
-            if self.training or always_cache:
-                hashf = blake2b(digest_size=15)
-                hashf.update(bytes(resp["original"], encoding="utf-8"))
-                hash = hashf.hexdigest()
-                self.executed_programs[frozen_commands] = hash
-                with open(
-                        os.path.join(self.executed_program_save_path,
-                                     f"{hash}.json"), "w") as f:
-                    f.write(json.dumps(resp))
-            else:
-                hash = None
-        if not resp["translated"]:
-            print(
-                f"WARNING: commands_to_program failed to produce program: {'new' if new else 'reused'}: {hash}"
-            )
-        elif resp["timed_out"]:
-            print(
-                f"WARNING: program execution timed out: {'new' if new else 'reused'}: {hash}"
-            )
-            self.timed_out.add(frozen_commands)
-        graph, feat = dgl_homograph_of_json(resp["output"], device)
-        return graph, feat, hash, resp["original"]
-
-    def deduplicate(self):
-        resp = deduplicate(self.name_of_domain,
-                           self.executed_program_save_path,
-                           max_color=self.max_color)
-        best, redundant = resp["best"], resp["redundant"]
-        reduction = {}
-        for b, rs in zip(best, redundant):
-            reduction[b] = b
-            for r in rs:
-                reduction[r] = b
-        executed_programs = {}
-        for frozen_commands, hash in self.executed_programs.items():
-            filename = f"{hash}.json"
-            if filename in reduction:
-                executed_programs[frozen_commands] = reduction[filename][:-5]
-            else:
-                raise Exception("executed program was not accounted for by")
-        for rs in redundant:
-            for r in rs:
-                os.remove(os.path.join(self.executed_program_save_path, r))
-        self.executed_programs = executed_programs
-        return reduction
-
-    def visualize(self, to_visualize=None):
-        if to_visualize is None:
-            to_visualize = os.listdir(self.executed_program_save_path)
-        named_graphs = {}
-        for fn in to_visualize:
-            if fn.endswith(".json"):
-                with open(os.path.join(self.executed_program_save_path,
-                                       fn)) as f:
-                    ep = json.load(f)
-                print(f"loading.. {fn}")
-                named_graphs[fn[:-5]] = \
-                    pygraphviz_graph_of_json(ep["output"], ep["beta_reduced"])
-        for name, graph in named_graphs.items():
-            graph.draw(
-                os.path.join(self.visualization_save_path, name + ".png"))
-
-    def clear_visualizations(self):
-        for filename in os.listdir(os.path.join(self.visualization_save_path)):
-            if filename.endswith(".png"):
-                os.remove(os.path.join(self.visualization_save_path, filename))
+    def explore(self,
+                exploration_timeout,
+                program_size,
+                eval_timeout=.1,
+                attempts=1):
+        resp = explore(self.name_of_domain,
+                       os.path.join(self.dsl_save_path,
+                                    f"{self.dsl_name}.json"),
+                       self.representations_save_path,
+                       exploration_timeout,
+                       program_size,
+                       eval_timeout=eval_timeout,
+                       attempts=attempts,
+                       max_color=self.max_color)
+        self._load_representations(resp["prev_files"], resp["cur_files"])
+        return resp["new"], resp["replaced"]
 
     def compress(self,
                  frontier,
                  next_dsl_name,
+                 load_new_dsl=True,
                  iterations=1,
                  beam_size=3,
                  top_i=3,
@@ -298,14 +203,13 @@ class GraphQuantizer(nn.Module):
                  primitive_size_penalty=1.,
                  n_beta_inversions=2,
                  verbosity=0):
-        next_dsl_file = os.path.join(self.dsl_save_path,
-                                     f"{next_dsl_name}.json")
         resp = compress(frontier,
                         self.name_of_domain,
                         os.path.join(self.dsl_save_path,
                                      f"{self.dsl_name}.json"),
-                        next_dsl_file,
-                        self.executed_program_save_path,
+                        os.path.join(self.dsl_save_path,
+                                     f"{next_dsl_name}.json"),
+                        self.representations_save_path,
                         iterations=iterations,
                         beam_size=beam_size,
                         top_i=top_i,
@@ -314,7 +218,44 @@ class GraphQuantizer(nn.Module):
                         n_beta_inversions=n_beta_inversions,
                         verbosity=verbosity,
                         max_color=self.max_color)
+        if load_new_dsl:
+            if resp["rewritten"]:
+                self.dsl_name = next_dsl_name
+                self._load_representations(
+                    resp["prev_files"], resp["cur_files"])
         return resp["rewritten"]
+
+    def _load_representations(self, prev_files, cur_files):
+        repl = {prev_file: cur_file for prev_file,
+                cur_file in zip(prev_files, cur_files)}
+        self.representations = [(repl[file] if file in repl else file)
+                                for file in self.representations]
+        reprs = set(self.representations)
+        self.representations.extend([file for file in os.listdir(
+            self.representations_save_path) if file not in reprs])
+        for code in range(len(self)):
+            self.restart_manager.add_code(code)
+
+    def clear_visualizations(self):
+        for filename in os.listdir(os.path.join(self.visualization_save_path)):
+            if filename.endswith(".svg"):
+                os.remove(os.path.join(self.visualization_save_path, filename))
+
+    def visualize(self, to_visualize=None):
+        if to_visualize is None:
+            to_visualize = os.listdir(self.representations_save_path)
+        named_graphs = {}
+        for filename in to_visualize:
+            if filename.endswith(".json"):
+                with open(os.path.join(self.representations_save_path,
+                                       filename)) as f:
+                    repr = json.load(f)
+                print(f"loading.. {filename}")
+                named_graphs[filename[:-5]] = \
+                    pygraphviz_graph_of_json(repr["output"], filename[:-5])
+        for name, graph in named_graphs.items():
+            graph.draw(
+                os.path.join(self.visualization_save_path, name + ".svg"))
 
 
 class NullQuantizer:
