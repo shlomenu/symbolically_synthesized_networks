@@ -10,8 +10,8 @@ clean-ocaml-build:
 	dune clean && \
 	cd ..
 
-pretty-programs-json:
-	for f in $(DOMAIN)/programs/*.json; do \
+pretty-repr-json:
+	for f in $(DOMAIN)/representations/*.json; do \
 	cat $$f | jq | sponge $$f; done
 
 pretty-dsls-json:
@@ -20,8 +20,8 @@ pretty-dsls-json:
 
 pretty-json: pretty-programs-json pretty-dsls-json
 
-clean-executed-programs: 
-	rm $(DOMAIN)/executed_programs/*
+clean-repr: 
+	rm $(DOMAIN)/representations/*
 
 clean-vis:
 	rm $(DOMAIN)/visualizations/*

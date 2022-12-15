@@ -47,7 +47,7 @@ def node_colors_of_json(graph_json, device):
 
 
 def dgl_graph_and_feats_of_json(graph_json, device):
-    """ 
+    """
     Assumes that json represents graph with no isolated nodes
     and containing at least one edge.
     """
@@ -113,7 +113,7 @@ class GraphQuantizer(nn.Module):
         self.representations = sorted(
             os.listdir(self.representations_save_path))
         self.restart_manager = RestartManager(
-            idleness_limit, len(self.representations), contextual=True)
+            idleness_limit, len(self.representations))
         self.attn_up = dgl.nn.GATv2Conv(in_feats=self.max_color,
                                         out_feats=C,
                                         num_heads=1,
@@ -226,13 +226,13 @@ class GraphQuantizer(nn.Module):
         return resp["rewritten"]
 
     def _load_representations(self, prev_files, cur_files):
-        repl = {prev_file: cur_file for prev_file,
-                cur_file in zip(prev_files, cur_files)}
-        self.representations = [(repl[file] if file in repl else file)
+        self.repl = {prev_file: cur_file for prev_file,
+                     cur_file in zip(prev_files, cur_files)}
+        self.representations = [(self.repl[file] if file in self.repl else file)
                                 for file in self.representations]
         reprs = set(self.representations)
-        self.representations.extend([file for file in os.listdir(
-            self.representations_save_path) if file not in reprs])
+        self.representations.extend(
+            set(os.listdir(self.representations_save_path)) - reprs)
         for code in range(len(self)):
             self.restart_manager.add_code(code)
 
@@ -251,8 +251,8 @@ class GraphQuantizer(nn.Module):
                                        filename)) as f:
                     repr = json.load(f)
                 print(f"loading.. {filename}")
-                named_graphs[filename[:-5]] = \
-                    pygraphviz_graph_of_json(repr["output"], filename[:-5])
+                named_graphs[filename[:-5]
+                             ] = pygraphviz_graph_of_json(repr["output"], filename[:-5])
         for name, graph in named_graphs.items():
             graph.draw(
                 os.path.join(self.visualization_save_path, name + ".svg"))

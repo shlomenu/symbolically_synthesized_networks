@@ -18,7 +18,7 @@ class StrideConv_ViT_Encoder(nn.Module):
     def __init__(self, codebook_dim, input_size, input_channels, upsize_channels,
                  vit_in_size, vit_depth, vit_heads, vit_head_dim, vit_mlp_dim):
         super().__init__()
-        assert (input_size >= vit_in_size and vit_depth > 2)
+        assert (input_size >= vit_in_size and vit_depth >= 1)
         stem_dims, HW, C = [], input_size, input_channels
         while HW > vit_in_size:
             out_channels = 2 * C if C != input_channels else upsize_channels
@@ -58,7 +58,7 @@ class StrideConv_ViT_Decoder(nn.Module):
     def __init__(self, codebook_dim, input_size, input_channels, upsize_channels,
                  vit_in_size, vit_depth, vit_heads, vit_head_dim, vit_mlp_dim):
         super().__init__()
-        assert (input_size >= vit_in_size and vit_depth > 1)
+        assert (input_size >= vit_in_size and vit_depth >= 1)
         stem_dims, HW, C = [], input_size, input_channels
         while HW > vit_in_size:
             out_channels = 2 * C if C != input_channels else upsize_channels
@@ -113,6 +113,51 @@ class StrideConv_ViT_Decoder(nn.Module):
 
     def loss(self, out, y):
         return F.mse_loss(out, y)
+
+
+class GlobalAvgPool(nn.Module):
+
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        self.net = nn.Linear(in_features, out_features)
+
+    def forward(self, x: th.Tensor):
+        return self.net(x.mean(dim=1))
+
+
+class StrideConv_ViT_Classifier(nn.Module):
+
+    def __init__(self, codebook_dim, n_classes, input_size, input_channels, upsize_channels,
+                 vit_in_size, vit_depth, vit_heads, vit_head_dim, vit_mlp_dim):
+        super().__init__()
+        assert (input_size >= vit_in_size and vit_depth >= 1)
+        stem_dims, HW, C = [], input_size, input_channels
+        while HW > vit_in_size:
+            out_channels = 2 * C if C != input_channels else upsize_channels
+            stem_dims.append((out_channels, C))
+            HW, C = HW // 2, out_channels
+        assert (HW == vit_in_size and C == codebook_dim)
+        layers = [
+            Rearrange("b (h w) c -> b h w c",
+                      h=vit_in_size,
+                      w=vit_in_size,
+                      c=C),
+            PositionalEmbedding(),
+            Rearrange("b h w c -> b (h w) c",
+                      h=vit_in_size,
+                      w=vit_in_size,
+                      c=C),
+            Transformer(C, vit_depth, vit_heads, vit_head_dim, vit_mlp_dim),
+            GlobalAvgPool(C, n_classes)
+        ]
+        self.net = nn.Sequential(*layers)
+        self.inner_seq_len = vit_in_size**2
+
+    def forward(self, x):
+        return self.net(x)
+
+    def loss(self, out: th.Tensor, y: th.Tensor):
+        return F.cross_entropy(out, y.squeeze(dim=-1))
 
 
 class ViT_Encoder(nn.Module):
@@ -193,11 +238,11 @@ class ViT_Decoder(nn.Module):
 
 class ConvResidual(nn.Module):
 
-    def __init__(self, channels, size):
+    def __init__(self, channels: int, size: int):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(channels, channels, kernel_size=3, padding=1,
-                      bias=False), nn.LayerNorm((channels, size, size)),
+                      bias=False), nn.LayerNorm([channels, size, size]),
             nn.Conv2d(channels, channels, kernel_size=1,
                       bias=False), nn.GELU(),
             nn.Conv2d(channels, channels, kernel_size=1, bias=False))
@@ -282,3 +327,38 @@ class PixelShuffle_ViT_Decoder(nn.Module):
 
     def loss(self, out, y):
         return F.mse_loss(out, y)
+
+
+class PixelShuffle_ViT_Classifier(nn.Module):
+
+    def __init__(self, codebook_dim, n_classes, input_size, input_channels,
+                 downsampled_size, conv_depth, vit_depth, vit_heads,
+                 vit_head_dim, vit_mlp_dim):
+        super().__init__()
+        assert (input_size >= downsampled_size and vit_depth > 0)
+        layers = [
+            Rearrange("b (h w) c -> b h w c",
+                      h=downsampled_size,
+                      w=downsampled_size,
+                      c=codebook_dim),
+            PositionalEmbedding(),
+            Rearrange("b h w c -> b (h w) c",
+                      h=downsampled_size,
+                      w=downsampled_size,
+                      c=codebook_dim),
+            Transformer(codebook_dim, vit_depth, vit_heads, vit_head_dim,
+                        vit_mlp_dim),
+            Rearrange("b (h w) c -> b c h w",
+                      h=downsampled_size,
+                      w=downsampled_size,
+                      c=codebook_dim),
+            GlobalAvgPool(codebook_dim, n_classes)
+        ]
+        self.net = nn.Sequential(*layers)
+        self.inner_seq_len = downsampled_size**2
+
+    def forward(self, x):
+        return self.net(x)
+
+    def loss(self, out: th.Tensor, y: th.Tensor):
+        return F.cross_entropy(out, y.squeeze(dim=-1))

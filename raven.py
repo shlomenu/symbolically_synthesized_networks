@@ -1,19 +1,24 @@
+from typing import Tuple
 import os
+import pickle
+import math
+from copy import deepcopy
+
 
 from raven_gen import Matrix, MatrixType, Ruleset, RuleType, ComponentType, LayoutType
 
+import torch as th
 from torch.utils.data import Dataset
 from torchvision.io import read_image
-import numpy as np
 from tqdm import trange
-import pickle
-from copy import deepcopy
+import numpy as np
 
 
 class RavenDataset(Dataset):
 
-    def __init__(self, dataset_dir, load_correct=True, load_incorrect=False):
+    def __init__(self, dataset_dir, classification=False):
         self.dataset_dir = dataset_dir
+        self.classification = classification
         self.data_dir = os.path.join(self.dataset_dir, "data")
         self.meta_dir = os.path.join(self.dataset_dir, "meta")
         self.pkl_dir = os.path.join(self.dataset_dir, "pkl")
@@ -21,12 +26,12 @@ class RavenDataset(Dataset):
         for filename in os.listdir(self.data_dir):
             no_ext = filename.split(".")[0]
             parts = no_ext.split("_")[1:]
-            if len(parts) == 4 and load_correct:
+            if len(parts) == 4:
                 instance_index, background_color, label = int(parts[0]), int(
                     parts[2]), parts[3]
                 assert label == "answer"
                 multi_indices.add((instance_index, -1, background_color))
-            elif len(parts) == 5 and load_incorrect:
+            elif len(parts) == 5 and self.classification:
                 instance_index, background_color, label, alternative_index = int(
                     parts[0]), int(parts[2]), parts[3], int(parts[4])
                 assert label == "alternative"
@@ -45,7 +50,10 @@ class RavenDataset(Dataset):
             filename = f"rpm_{instance}_background_{background_color}_alternative_{sub_instance}.png"
         img = read_image(os.path.join(self.data_dir, filename))
         img = (2. * (img / 255.) - 1.).float()
-        return img, img
+        if self.classification:
+            return img, th.tensor([1] if sub_instance < 0 else [0], dtype=th.long)
+        else:
+            return img, img
 
     def description(self, i):
         instance, _, _ = self.multi_indices[i]
@@ -66,12 +74,45 @@ class RavenDataset(Dataset):
             return pickle.load(f)
 
     @classmethod
-    def multisplit(cls, dataset_dir, batch_size, batches_per_portion, load_correct=True, load_incorrect=False):
+    def bisplit(cls, dataset_dir, prop, load_prop, batch_size, classification):
+        """
+        Splits data in dataset_dir randomly into two portions.
+        """
+        assert (0 <= prop and prop <= 1 and 0 < load_prop and load_prop <= 1)
+        dataset = cls(dataset_dir, classification)
+        n_instances = len(
+            {instance for (instance, _, _) in dataset.multi_indices}
+        )
+        assert ((len(dataset) % n_instances) == 0)
+        puzzles_per_instance = len(dataset) // n_instances
+        n_instances = math.ceil(load_prop * n_instances)
+        assert (batch_size >= 1 and (batch_size % puzzles_per_instance) == 0)
+        instances_per_batch = batch_size // puzzles_per_instance
+        n_instances_x: int = math.ceil(prop * n_instances)
+        n_instances_y: int = math.floor((1 - prop) * n_instances)
+        assert (n_instances_x >= 1 and n_instances_y >= 1 and (
+            n_instances_x % instances_per_batch) == 0 and (n_instances_x % instances_per_batch) == 0)
+        multi_indices = deepcopy(dataset.multi_indices)
+        del dataset.multi_indices[:]
+        dataset_x, dataset_y = deepcopy(dataset), deepcopy(dataset)
+        x_instances = sorted(np.random.choice(
+            n_instances, n_instances_x, replace=False))
+        for i in range(n_instances):
+            if x_instances and i == x_instances[0]:
+                dataset_x.multi_indices.extend(
+                    multi_indices[i * puzzles_per_instance:(i + 1) * puzzles_per_instance])
+                del x_instances[0]
+            else:
+                dataset_y.multi_indices.extend(
+                    multi_indices[i * puzzles_per_instance:(i + 1) * puzzles_per_instance])
+        return dataset_x, dataset_y
+
+    @classmethod
+    def multisplit(cls, dataset_dir, batch_size, batches_per_portion, classification):
         """
         Splits data in dataset_dir randomly into portions of size `batch_size * batches_per_portion`. 
         """
-        dataset = cls(dataset_dir, load_correct=load_correct,
-                      load_incorrect=load_incorrect)
+        dataset = cls(dataset_dir, classification)
         n_instances = len(
             {instance for (instance, _, _) in dataset.multi_indices})
         assert ((len(dataset) % n_instances) == 0)
