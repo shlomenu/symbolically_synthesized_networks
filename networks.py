@@ -348,10 +348,6 @@ class PixelShuffle_ViT_Classifier(nn.Module):
                       c=codebook_dim),
             Transformer(codebook_dim, vit_depth, vit_heads, vit_head_dim,
                         vit_mlp_dim),
-            Rearrange("b (h w) c -> b c h w",
-                      h=downsampled_size,
-                      w=downsampled_size,
-                      c=codebook_dim),
             GlobalAvgPool(codebook_dim, n_classes)
         ]
         self.net = nn.Sequential(*layers)

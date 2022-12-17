@@ -107,31 +107,6 @@ class RavenDataset(Dataset):
                     multi_indices[i * puzzles_per_instance:(i + 1) * puzzles_per_instance])
         return dataset_x, dataset_y
 
-    @classmethod
-    def multisplit(cls, dataset_dir, batch_size, batches_per_portion, classification):
-        """
-        Splits data in dataset_dir randomly into portions of size `batch_size * batches_per_portion`. 
-        """
-        dataset = cls(dataset_dir, classification)
-        n_instances = len(
-            {instance for (instance, _, _) in dataset.multi_indices})
-        assert ((len(dataset) % n_instances) == 0)
-        puzzles_per_instance = len(dataset) // n_instances
-        assert ((batch_size % puzzles_per_instance) == 0)
-        instances_per_batch = batch_size // puzzles_per_instance
-        instances_per_portion = batches_per_portion * instances_per_batch
-        n_portions = n_instances // instances_per_portion
-        n_used: int = n_portions * instances_per_portion
-        multi_indices = deepcopy(dataset.multi_indices)
-        del dataset.multi_indices[:]
-        portions = [deepcopy(dataset) for _ in range(n_portions)]
-        for i, inst in enumerate(np.random.choice(n_instances, n_used, replace=False)):
-            portions[i // instances_per_portion].multi_indices.extend(
-                multi_indices[inst * puzzles_per_instance:(inst + 1) * puzzles_per_instance])
-        for portion in portions:
-            portion.multi_indices.sort()
-        return portions
-
 
 def generate_data(size, dataset_dir, save_pickle=False):
     Matrix.oblique_angle_rotations(allowed=False)

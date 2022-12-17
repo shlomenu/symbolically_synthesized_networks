@@ -263,7 +263,7 @@ class PSN(nn.Module):
                     data_iterator = iter(dataloader)
                     x, y = next(data_iterator)
                 x, y = x.to(device), y.to(device)
-                _, loss, filenames = self(
+                out, loss, filenames = self(
                     x, y, quantization_noise_std, mode)
                 py_loss = loss.item()
                 smoothed_loss = alpha * py_loss + (1 - alpha) * smoothed_loss
@@ -285,8 +285,8 @@ class PSN(nn.Module):
                     loss.backward()
                     self.optimizer.step()
                     self.apply_restarts()
-                del (x, y, loss)
-                yield (py_loss, filenames, all_representations)
+                del (x, loss)
+                yield (out.detach(), y, py_loss, filenames, all_representations)
 
     def apply_restarts(self):
         if self.in_restarts is not None:
@@ -320,10 +320,10 @@ class PSN(nn.Module):
 
     def compression(self, dataset, batch_size, max_compressed, next_dsl_name, device, **kwargs):
         frontier = []
-        for (_, filenames, _) in self.run(dataset, batch_size, 1,
-                                          "learned", device,
-                                          quantization_noise_std=0., shuffle=False,
-                                          train=False):
+        for (_, _, _, filenames, _) in self.run(dataset, batch_size, 1,
+                                                "learned", device,
+                                                quantization_noise_std=0., shuffle=False,
+                                                train=False):
             frontier.extend(filenames)
         if len(frontier) > max_compressed:
             frontier = np.random.choice(

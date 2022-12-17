@@ -226,9 +226,9 @@ class GraphQuantizer(nn.Module):
         return resp["rewritten"]
 
     def _load_representations(self, prev_files, cur_files):
-        self.repl = {prev_file: cur_file for prev_file,
-                     cur_file in zip(prev_files, cur_files)}
-        self.representations = [(self.repl[file] if file in self.repl else file)
+        repl = {prev_file: cur_file for prev_file,
+                cur_file in zip(prev_files, cur_files)}
+        self.representations = [(repl[file] if file in repl else file)
                                 for file in self.representations]
         reprs = set(self.representations)
         self.representations.extend(
