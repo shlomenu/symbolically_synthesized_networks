@@ -1,5 +1,5 @@
 (executables
- (names explore compress)
+ (names explore dreamcoder_compress incorporate_stitch)
  (modes native)
  (libraries core antireduce antireduce_graphs)
  (preprocess
