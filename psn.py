@@ -1,3 +1,5 @@
+from collections import defaultdict
+import math
 import os
 from typing import Optional, Tuple, List
 
@@ -62,7 +64,8 @@ class PSN(nn.Module):
 
     def initial_codebook(self, size, dim):
         codebook = nn.Embedding(size, dim)
-        codebook.weight.data.uniform_(-1., 1.)
+        codebook.weight.data.uniform_(-1. / (size if size >
+                                      0. else 1.), 1. / (size if size > 0. else 1.))
         codebook.weight.data -= codebook.weight.data.mean(dim=0)
         return codebook
 
@@ -73,7 +76,8 @@ class PSN(nn.Module):
                 self.in_restarts = None
             if self.out_restarts is not None:
                 self.out_restarts = None
-            out = self.post_quantizer(self.pre_quantizer(x))
+            encoding_inds = None
+            out = self.post_quantizer(self.pre_quantizer(x), encoding_inds)
             return (out, self.post_quantizer.loss(out, y), None)
         if mode == "nearest":
             if self.in_restarts is not None:
@@ -84,7 +88,8 @@ class PSN(nn.Module):
                     latents, self.out_codebook, self.E, quantization_noise_std)
             self._set_out_restarts(latents, encoding_inds_noisy)
             out = self.post_quantizer(latents + (quantized_latents_noisy -
-                                                 latents).detach())
+                                                 latents).detach(),
+                                      encoding_inds_noisy)
             return (out,
                     self.vqvae_loss(
                         out,
@@ -98,7 +103,7 @@ class PSN(nn.Module):
                 self.nearest_neighbors(pg_in_latents,
                                        self.in_codebook, self.P, quantization_noise_std, noisy=False)
             pg_out_latents, in_restarts, filenames = self.quantizer(
-                pg_in_encoding_inds.flatten())
+                quantized_pg_in_latents.detach(), pg_in_encoding_inds)
             if in_restarts:
                 self.in_restarts = (
                     rearrange(pg_in_latents.detach(),
@@ -115,7 +120,8 @@ class PSN(nn.Module):
             self._set_out_restarts(pg_in_latents, pg_out_encoding_inds_noisy)
             out = self.post_quantizer(pg_in_latents +
                                       (quantized_pg_out_latents_noisy -
-                                       pg_in_latents).detach())
+                                       pg_in_latents).detach(),
+                                      pg_out_encoding_inds_noisy)
             quantized_pg_in_latents_slim = rearrange(quantized_pg_in_latents,
                                                      "b p (r c) -> b (p r) c",
                                                      p=self.P,
@@ -227,9 +233,12 @@ class PSN(nn.Module):
             device,
             quantization_noise_std=.5,
             alpha=.8,
+            scheduler=None,
             optimizer=None,
+            perf_metric=None,
             shuffle=True,
-            train=True):
+            train=True,
+            use_scheduler=True):
         if train:
             self.train()
         else:
@@ -241,52 +250,84 @@ class PSN(nn.Module):
             self.optimizer = optimizer
         elif not hasattr(self, "optimizer") or self.optimizer is None:
             self.optimizer = th.optim.Adam(self.parameters())
+        if scheduler is not None:
+            self.scheduler = scheduler(self.optimizer)
+        elif not hasattr(self, "scheduler") or self.scheduler is None:
+            self.scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer, mode="min", factor=.5, patience=50,
+                verbose=True, threshold=1e-4, cooldown=15)
         dataloader = DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle)
-        smoothed_loss, smoothed_diversity, all_representations = 0, 0, set()
+        total_loss, total_mass, repr_usage = 0., 0., defaultdict(
+            int)
         assert ((len(dataset) % batch_size) == 0)
         steps_per_epoch = len(dataset) // batch_size
         total_steps = n_epochs * steps_per_epoch
         bar_format = "{bar}{r_bar} - " \
                      "epoch: {epoch:3.0f}, " \
-                     "loss: {smoothed_loss:.4f}, " \
-                     "div.: {smoothed_div:.4f}, " \
-                     "tot. div.: {tot_div:.4f}"
-        extras = {"epoch": 0, "smoothed_loss": 0.0,
-                  "smoothed_div": float("NaN"), "tot_div": float("NaN")}
+                     "loss: {loss:.4f}, " \
+                     "tot. loss: {tot_loss:.4f}, " \
+                     "div.: {div:.4f}, " \
+                     "tot. div.: {tot_div:.4f}, " \
+                     "mass: {mass:.4f}, " \
+                     "tot. mass: {tot_mass:.4f}, " \
+                     "perf.: {perf:.4f}"
+        extras = {"epoch": 0, "loss": 0., "tot_loss": 0.,
+                  "div": float("NaN"), "tot_div": float("NaN"),
+                  "mass": float("NaN"), "tot_mass": float("NaN"),
+                  "perf": float("NaN")}
         data_iterator = iter(dataloader)
         with TqdmExtraFormat(total=total_steps, bar_format=bar_format, extras=extras) as pbar:
             for i in range(1, total_steps + 1):
                 try:
-                    x, y = next(data_iterator)
+                    x, target = next(data_iterator)
                 except StopIteration:
                     data_iterator = iter(dataloader)
-                    x, y = next(data_iterator)
-                x, y = x.to(device), y.to(device)
-                out, loss, filenames = self(
-                    x, y, quantization_noise_std, mode)
-                py_loss = loss.item()
-                smoothed_loss = alpha * py_loss + (1 - alpha) * smoothed_loss
-                if filenames is not None:
-                    smoothed_diversity = alpha * \
-                        (len(set(filenames)) / len(filenames)) + \
-                        (1 - alpha) * smoothed_diversity
-                    all_representations.update(filenames)
-                pbar.extras["epoch"] = (i // steps_per_epoch)
-                pbar.extras["smoothed_loss"] = smoothed_loss
-                pbar.extras["smoothed_div"] = (
-                    float("NaN") if filenames is None else smoothed_diversity)
-                pbar.extras["tot_div"] = (
-                    float("NaN") if filenames is None else (
-                        len(all_representations) / len(self.quantizer)))
-                pbar.update()
+                    x, target = next(data_iterator)
+                x, target = x.to(device), target.to(device)
+                output, loss, filenames = self(
+                    x, target, quantization_noise_std, mode)
                 if train:
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
                     self.apply_restarts()
-                del (x, loss)
-                yield (out.detach(), y, py_loss, filenames, all_representations)
+                    if use_scheduler:
+                        self.scheduler.step(loss)
+                pbar.extras["epoch"] = (i // steps_per_epoch)
+                if perf_metric is not None:
+                    perf_metric.tally(output, target)
+                    pbar.extras["perf"] = perf_metric.measure()
+                loss = loss.item()
+                pbar.extras["loss"] = alpha * \
+                    loss + (1 - alpha) * pbar.extras["loss"]
+                total_loss += loss
+                pbar.extras["tot_loss"] = total_loss / i
+                if filenames is not None:
+                    pbar.extras["div"] = alpha * \
+                        (len(set(filenames)) / len(filenames)) + \
+                        (1 - alpha) * \
+                        (0. if math.isnan(pbar.extras["div"])
+                         else pbar.extras["div"])
+                    for filename in filenames:
+                        repr_usage[filename] += 1
+                    pbar.extras["tot_div"] = len(
+                        repr_usage) / len(self.quantizer)
+                    mass = self.quantizer.mass_of_representations(
+                        filenames)
+                    pbar.extras["mass"] = mass
+                    total_mass += mass
+                    pbar.extras["tot_mass"] = total_mass / i
+                pbar.update()
+        if train:
+            self.quantizer.repr_usage = repr_usage
+        return {
+            "perf": perf_metric.measure() if perf_metric is not None else None,
+            "total_loss": pbar.extras["tot_loss"],
+            "total_diversity": pbar.extras["tot_div"],
+            "total_mass": pbar.extras["tot_mass"],
+            "representations_usages": self.quantizer.repr_usage
+        }
 
     def apply_restarts(self):
         if self.in_restarts is not None:
@@ -303,33 +344,98 @@ class PSN(nn.Module):
             self.out_codebook.weight.data[to_restart] = randomized
             self.out_restarts = None
 
-    def exploration(self, exploration_timeout, program_size, **kwargs):
-        new, replaced = self.quantizer.explore(
-            exploration_timeout, program_size, **kwargs)
+    def exploration(self,
+                    frontier_size,
+                    exploration_timeout,
+                    next_dsl_name=None,
+                    repr_usage=None,
+                    **kwargs):
+        prev_dsl_name = self.quantizer.dsl_name
+        if repr_usage is None:
+            repr_usage = self.quantizer.repr_usage
+        frontier, frontier_statistics = self._make_frontier(
+            repr_usage, frontier_size)
+        frontier_div, frontier_mass = \
+            frontier_statistics if frontier_statistics is not None else (
+                None, None)
+        new, replaced, mass_statistics, n_enumerated, max_description_length = self.quantizer.explore(
+            frontier, next_dsl_name, exploration_timeout, **kwargs)
         if len(self.quantizer) != self.I:
             I = len(self.quantizer)
             in_codebook = self.initial_codebook(I,
                                                 (self.E // self.P) * self.C).to(
                 self.in_codebook.weight.device)
-            in_codebook.weight.data[:self.I] = self.in_codebook.weight.data
+            # in_codebook.weight.data[:self.I] = self.in_codebook.weight.data
             self.I, self.in_codebook = I, in_codebook
             for code in range(self.I):
                 self.out_restart_manager.add_code(code)
             self.in_restarts, self.out_restarts = None, None
-        return new, replaced, self.I
+        result = {
+            "exploration_timeout": exploration_timeout,
+            "new": new,
+            "replaced": replaced,
+            "total": self.I,
+            "n_enumerated": n_enumerated,
+            "maximum_description_length": max_description_length,
+            "frontier_size": frontier_size,
+            "truncated_frontier": frontier_statistics is None,
+            "frontier_div": frontier_div,
+            "frontier_mass": frontier_mass,
+            "min_mass": mass_statistics[0],
+            "max_mass": mass_statistics[1],
+            "avg_mass": mass_statistics[2],
+            "prev_dsl_name": prev_dsl_name,
+            "next_dsl_name": self.quantizer.dsl_name}
+        result.update(**kwargs)
+        return result
 
-    def compression(self, dataset, batch_size, max_compressed, next_dsl_name, device, **kwargs):
-        frontier = []
-        for (_, _, _, filenames, _) in self.run(dataset, batch_size, 1,
-                                                "learned", device,
-                                                quantization_noise_std=0., shuffle=False,
-                                                train=False):
-            frontier.extend(filenames)
-        if len(frontier) > max_compressed:
+    def compression(self,
+                    frontier_size,
+                    repr_usage=None,
+                    next_dsl_name=None,
+                    stitch_compression=True,
+                    **kwargs):
+        prev_dsl_name = self.quantizer.dsl_name
+        if repr_usage is None:
+            repr_usage = self.quantizer.repr_usage
+        frontier, frontier_statistics = self._make_frontier(
+            repr_usage, frontier_size)
+        frontier_div, frontier_mass = \
+            frontier_statistics if frontier_statistics is not None else (
+                None, None)
+        if stitch_compression:
+            dsl_mass = self.quantizer.stitch_compress(
+                frontier, next_dsl_name, **kwargs)
+        else:
+            dsl_mass = self.quantizer.dreamcoder_compress(
+                frontier, next_dsl_name, **kwargs)
+        result = {
+            "next_dsl_mass": dsl_mass,
+            "frontier_size": frontier_size,
+            "truncated_frontier": frontier_statistics is None,
+            "frontier_div": frontier_div,
+            "frontier_mass": frontier_mass,
+            "prev_dsl_name": prev_dsl_name,
+            "next_dsl_name": self.quantizer.dsl_name,
+            "stitch_compression": stitch_compression}
+        result.update(**kwargs)
+        return result
+
+    def _make_frontier(self, repr_usage, frontier_size):
+        if len(repr_usage) > frontier_size:
+            total = sum(repr_usage.values())
             frontier = np.random.choice(
-                frontier, max_compressed, replace=False).tolist()
-        self.quantizer.clear_visualizations()
-        self.quantizer.visualize(set(frontier))
-        rewritten = self.quantizer.compress(
-            frontier, next_dsl_name, **kwargs)
-        return rewritten
+                list(repr_usage.keys()),
+                int(frontier_size),
+                replace=True,
+                p=[count / total for count in repr_usage.values()]).tolist()
+            frontier_statistics = (
+                len(repr_usage) / len(self.quantizer),
+                self.quantizer.mass_of_representations(frontier)
+            )
+        else:
+            frontier = []
+            for filename, count in repr_usage.items():
+                frontier += [filename] * count
+            frontier_statistics = None
+        return frontier, frontier_statistics

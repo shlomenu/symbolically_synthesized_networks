@@ -18,10 +18,12 @@ pretty-dsls-json:
 	for f in $(DOMAIN)/dsls/*.json; do \
 	cat $$f | jq | sponge $$f; done
 
-pretty-json: pretty-programs-json pretty-dsls-json
+pretty-json: pretty-repr-json pretty-dsls-json
 
 clean-repr: 
 	rm $(DOMAIN)/representations/*
 
 clean-vis:
 	rm $(DOMAIN)/visualizations/*
+
+clean-json: clean-repr clean-vis

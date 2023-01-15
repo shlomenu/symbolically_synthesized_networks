@@ -1,24 +1,19 @@
-from typing import Tuple
 import os
 import pickle
 import math
 from copy import deepcopy
 
 
-from raven_gen import Matrix, MatrixType, Ruleset, RuleType, ComponentType, LayoutType
-
-import torch as th
 from torch.utils.data import Dataset
 from torchvision.io import read_image
-from tqdm import trange
 import numpy as np
 
 
 class RavenDataset(Dataset):
 
-    def __init__(self, dataset_dir, classification=False):
+    def __init__(self, dataset_dir, annotate, include_incorrect=False):
         self.dataset_dir = dataset_dir
-        self.classification = classification
+        self.include_incorrect = include_incorrect
         self.data_dir = os.path.join(self.dataset_dir, "data")
         self.meta_dir = os.path.join(self.dataset_dir, "meta")
         self.pkl_dir = os.path.join(self.dataset_dir, "pkl")
@@ -31,13 +26,16 @@ class RavenDataset(Dataset):
                     parts[2]), parts[3]
                 assert label == "answer"
                 multi_indices.add((instance_index, -1, background_color))
-            elif len(parts) == 5 and self.classification:
+            elif len(parts) == 5 and self.include_incorrect:
                 instance_index, background_color, label, alternative_index = int(
                     parts[0]), int(parts[2]), parts[3], int(parts[4])
                 assert label == "alternative"
                 multi_indices.add(
                     (instance_index, alternative_index, background_color))
         self.multi_indices = sorted(multi_indices)
+        self.annotate = annotate(self)
+        self.annotations = {
+            multi_index: None for multi_index in self.multi_indices}
 
     def __len__(self):
         return len(self.multi_indices)
@@ -48,53 +46,65 @@ class RavenDataset(Dataset):
             filename = f"rpm_{instance}_background_{background_color}_answer.png"
         else:
             filename = f"rpm_{instance}_background_{background_color}_alternative_{sub_instance}.png"
-        img = read_image(os.path.join(self.data_dir, filename))
-        img = (2. * (img / 255.) - 1.).float()
-        if self.classification:
-            return img, th.tensor([1] if sub_instance < 0 else [0], dtype=th.long)
-        else:
-            return img, img
+        img = (
+            2. * (read_image(os.path.join(self.data_dir, filename)) / 255.) - 1.).float()
+        return img, self.annotate(instance, sub_instance, background_color, img)
+
+    def _description(self, instance):
+        filename = f"rpm_{instance}_description.txt"
+        with open(os.path.join(self.meta_dir, filename)) as f:
+            return f.read()
 
     def description(self, i):
         instance, _, _ = self.multi_indices[i]
-        filename = f"rpm_{instance}_description.txt"
+        return self._description(instance)
+
+    def _rules(self, instance):
+        filename = f"rpm_{instance}_rules.txt"
         with open(os.path.join(self.meta_dir, filename)) as f:
             return f.read()
 
     def rules(self, i):
         instance, _, _ = self.multi_indices[i]
-        filename = f"rpm_{instance}_rules.txt"
-        with open(os.path.join(self.meta_dir, filename)) as f:
-            return f.read()
+        return self._rules(instance)
 
-    def rpm(self, i):
-        instance, _, _ = self.multi_indices[i]
+    def _rpm(self, instance):
         filename = f"rpm_{instance}.pkl"
         with open(os.path.join(self.pkl_dir, filename), "rb") as f:
             return pickle.load(f)
 
+    def rpm(self, i):
+        instance, _, _ = self.multi_indices[i]
+        return self._rpm(instance)
+
     @classmethod
-    def bisplit(cls, dataset_dir, prop, load_prop, batch_size, classification):
+    def bisplit(cls, dataset_dir, annotate_1, annotate_2, prop, load_prop, batch_size, include_incorrect=False):
         """
         Splits data in dataset_dir randomly into two portions.
         """
         assert (0 <= prop and prop <= 1 and 0 < load_prop and load_prop <= 1)
-        dataset = cls(dataset_dir, classification)
+        dataset = cls(dataset_dir, annotate_1,
+                      include_incorrect=include_incorrect)
         n_instances = len(
             {instance for (instance, _, _) in dataset.multi_indices}
         )
         assert ((len(dataset) % n_instances) == 0)
         puzzles_per_instance = len(dataset) // n_instances
         n_instances = math.ceil(load_prop * n_instances)
-        assert (batch_size >= 1 and (batch_size % puzzles_per_instance) == 0)
+        assert (batch_size >= 1 and ((batch_size % puzzles_per_instance) == 0))
         instances_per_batch = batch_size // puzzles_per_instance
+        n_instances -= (n_instances % instances_per_batch)
         n_instances_x: int = math.ceil(prop * n_instances)
         n_instances_y: int = math.floor((1 - prop) * n_instances)
-        assert (n_instances_x >= 1 and n_instances_y >= 1 and (
-            n_instances_x % instances_per_batch) == 0 and (n_instances_x % instances_per_batch) == 0)
+        n_instances_x -= (n_instances_x % instances_per_batch)
+        n_instances_y -= (n_instances_y % instances_per_batch)
+        assert (n_instances_x >= 1 and n_instances_y >= 1)
         multi_indices = deepcopy(dataset.multi_indices)
         del dataset.multi_indices[:]
-        dataset_x, dataset_y = deepcopy(dataset), deepcopy(dataset)
+        dataset_x = dataset
+        dataset_y = cls(dataset_dir, annotate_2,
+                        include_incorrect=include_incorrect)
+        del dataset_y.multi_indices[:]
         x_instances = sorted(np.random.choice(
             n_instances, n_instances_x, replace=False))
         for i in range(n_instances):
@@ -106,53 +116,3 @@ class RavenDataset(Dataset):
                 dataset_y.multi_indices.extend(
                     multi_indices[i * puzzles_per_instance:(i + 1) * puzzles_per_instance])
         return dataset_x, dataset_y
-
-
-def generate_data(size, dataset_dir, save_pickle=False):
-    Matrix.oblique_angle_rotations(allowed=False)
-    ruleset = Ruleset(size_rules=[RuleType.CONSTANT])
-    matrix_types = [
-        MatrixType.ONE_SHAPE, MatrixType.FOUR_SHAPE, MatrixType.FIVE_SHAPE,
-        MatrixType.TWO_SHAPE_VERTICAL_SEP, MatrixType.TWO_SHAPE_HORIZONTAL_SEP,
-        MatrixType.SHAPE_IN_SHAPE
-    ]
-    weights = [.15, .2, .2, .15, .15, .15]
-    Matrix.attribute_bounds[MatrixType.FOUR_SHAPE][(
-        ComponentType.NONE, LayoutType.GRID_FOUR)]["size_min"] = 3
-    Matrix.attribute_bounds[MatrixType.FIVE_SHAPE][(
-        ComponentType.NONE, LayoutType.GRID_FIVE)]["size_min"] = 5
-    Matrix.attribute_bounds[MatrixType.TWO_SHAPE_VERTICAL_SEP][(
-        ComponentType.LEFT, LayoutType.CENTER)]["size_min"] = 3
-    Matrix.attribute_bounds[MatrixType.TWO_SHAPE_VERTICAL_SEP][(
-        ComponentType.RIGHT, LayoutType.CENTER)]["size_min"] = 3
-    Matrix.attribute_bounds[MatrixType.TWO_SHAPE_HORIZONTAL_SEP][(
-        ComponentType.UP, LayoutType.CENTER)]["size_min"] = 3
-    Matrix.attribute_bounds[MatrixType.TWO_SHAPE_HORIZONTAL_SEP][(
-        ComponentType.DOWN, LayoutType.CENTER)]["size_min"] = 3
-    Matrix.attribute_bounds[MatrixType.SHAPE_IN_SHAPE][(
-        ComponentType.OUT, LayoutType.CENTER)]["size_min"] = 5
-    Matrix.attribute_bounds[MatrixType.SHAPE_IN_SHAPE][(
-        ComponentType.IN, LayoutType.CENTER)]["size_min"] = 5
-    background_colors = list(range(28, 225, 28))
-    for i in trange(size):
-        rpm = Matrix.make(np.random.choice(matrix_types, p=weights),
-                          ruleset=ruleset,
-                          n_alternatives=1)
-        background_color = np.random.choice(background_colors)
-        rpm.save(os.path.join(dataset_dir, "data"),
-                 f"rpm_{i}_background_{background_color}",
-                 background_color,
-                 image_size=128,
-                 line_thickness=1,
-                 shape_border_thickness=1)
-        with open(
-                os.path.join(dataset_dir, "meta", f"rpm_{i}_description.txt"),
-                "w") as f:
-            f.write(str(rpm))
-        with open(os.path.join(dataset_dir, "meta", f"rpm_{i}_rules.txt"),
-                  "w") as f:
-            f.write(str(rpm.rules))
-        if save_pickle:
-            with open(os.path.join(dataset_dir, "pkl", f"rpm_{i}.pkl"),
-                      "wb") as f:
-                pickle.dump(rpm, f)
