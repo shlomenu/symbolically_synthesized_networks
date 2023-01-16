@@ -25,6 +25,16 @@ let dsl_sensitive_parser_of_domain = function
   | name_of_domain ->
       failwith @@ Format.sprintf "unrecognized domain: %s" name_of_domain
 
+let stitch_invention_parser_of_domain = function
+  | "graph" ->
+      fun dsl ->
+        Graph.parse_stitch_invention_exn ~primitives:(fun _ ->
+            Hashtbl.of_alist_exn (module String)
+            @@ List.map dsl.library ~f:(fun ent ->
+                   (ent.stitch_name, primitive_of_entry ent) ) )
+  | name_of_domain ->
+      failwith @@ Format.sprintf "unrecognized domain: %s" name_of_domain
+
 let request_of_domain = function
   | "graph" ->
       Graph.graph_transform

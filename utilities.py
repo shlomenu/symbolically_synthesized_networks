@@ -81,7 +81,7 @@ def stitch_compress(frontier,
                     threads,
                     verbose,
                     **stitch_kwargs):
-    stitch_kwargs.update(dynamic_batch=True, disable_stat_logging=True)
+    stitch_kwargs.update(dynamic_batch=True)
     return stitch_core.compress(frontier, iterations, max_arity=n_beta_inversions,
                                 threads=threads, silent=(not verbose), **stitch_kwargs)
 
@@ -89,7 +89,7 @@ def stitch_compress(frontier,
 def stitch_rewrite(non_frontier,
                    abstractions,
                    **stitch_kwargs):
-    stitch_kwargs.update(dynamic_batch=True, disable_stat_logging=True)
+    stitch_kwargs.update(dynamic_batch=True)
     return stitch_core.rewrite(non_frontier, abstractions, **stitch_kwargs)
 
 

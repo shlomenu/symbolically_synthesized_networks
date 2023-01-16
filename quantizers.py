@@ -198,7 +198,7 @@ class GraphQuantizer(nn.Module):
         return (
             resp["new"],
             resp["replaced"],
-            self._load_representations(resp["replacements"]),
+            self._load_representations(dict(resp["replacements"])),
             resp["n_enumerated"],
             resp["max_description_length"])
 
@@ -239,7 +239,7 @@ class GraphQuantizer(nn.Module):
         if resp["new_dsl_mass"]:
             self.dsl_name = next_dsl_name
             self.dsl_mass = resp["new_dsl_mass"]
-            self._load_representations(resp["replacements"])
+            self._load_representations(dict(resp["replacements"]))
         return resp["new_dsl_mass"]
 
     def stitch_compress(self,
@@ -255,8 +255,13 @@ class GraphQuantizer(nn.Module):
             parts = self.dsl_name.split("_")
             next_dsl_name = "_".join(
                 ("_".join(parts[:-1]), str(int(parts[-1]) + 1)))
+        frontier_programs = []
+        for filename in frontier:
+            with open(os.path.join(self.representations_save_path, filename)) as f:
+                contents = json.load(f)
+                frontier_programs.append(contents["stitch_program"])
         res = stitch_compress(
-            frontier,
+            frontier_programs,
             iterations=iterations,
             n_beta_inversions=n_beta_inversions,
             threads=threads,
@@ -280,7 +285,7 @@ class GraphQuantizer(nn.Module):
                 self.representations_save_path)
             self.dsl_name = next_dsl_name
             self.dsl_mass = resp["new_dsl_mass"]
-            self._load_representations(resp["replacements"])
+            self._load_representations(dict(resp["replacements"]))
             return resp["new_dsl_mass"]
         else:
             return None

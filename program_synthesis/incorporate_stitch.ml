@@ -16,8 +16,10 @@ let () =
          ~init:
            ( dsl_of_yojson @@ S.from_file @@ SU.to_string
            @@ SU.member "dsl_file" j )
-         ~f:(fun dsl inv ->
-           let parse = Domains.dsl_sensitive_parser_of_domain domain dsl j in
+         ~f:(fun dsl' inv ->
+           let parse =
+             Domains.stitch_invention_parser_of_domain domain dsl' j
+           in
            let invented_primitive =
              match inv with
              | [name; body] ->
@@ -27,8 +29,8 @@ let () =
                    "incorporate_stitch: improperly formatted invented \
                     primitives: expected list of lists of [name, body]"
            in
-           dedup_dsl_of_primitives dsl.state_type
-             (invented_primitive :: primitives_of_dsl dsl) )
+           dedup_dsl_of_primitives dsl'.state_type
+             (invented_primitive :: primitives_of_dsl dsl') )
   in
   let replacements =
     let parse = Domains.dsl_sensitive_parser_of_domain domain dsl' j in
