@@ -22,7 +22,7 @@ def explore(domain,
             exploration_timeout,
             *,
             eval_timeout,
-            attempts,
+            eval_attempts,
             **kwargs):
     json_msg = {
         "domain": domain,
@@ -32,7 +32,7 @@ def explore(domain,
         "representations_dir": representations_dir,
         "exploration_timeout": exploration_timeout,
         "eval_timeout": eval_timeout,
-        "attempts": attempts
+        "attempts": eval_attempts
     }
     json_msg.update(kwargs)
     return invoke_binary_with_json(EXPLORE_BINARY_LOC, json_msg)

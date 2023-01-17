@@ -51,8 +51,10 @@ let () =
     in
     S.to_channel Out_channel.stdout
       (`Assoc
-        [ ("new_dsl_mass", yojson_of_int dsl'.mass)
+        [ ("success", yojson_of_bool true)
+        ; ("next_dsl_mass", yojson_of_int dsl'.mass)
         ; ( "replacements"
           , yojson_of_list (yojson_of_list yojson_of_string)
             @@ List.map replacements ~f:(fun (prev, cur) -> [prev; cur]) ) ] ) )
-  else S.to_channel Out_channel.stdout @@ `Assoc [("new_dsl_mass", `Null)]
+  else
+    S.to_channel Out_channel.stdout @@ `Assoc [("success", yojson_of_bool false)]

@@ -72,7 +72,6 @@ def generate_data(size, dataset_dir, save_pickle=False):
                 pickle.dump(rpm, f)
 
 
-PROGRAM_SIZE = 12
 OUT_CODEBOOK_SIZE = 1024
 CODEBOOK_DIM = 512
 INITIAL_DSL = "dsl_0"
@@ -262,7 +261,7 @@ class F1Metric:
             (2 * self.tp) / (2 * self.tp + self.fp + self.fn + self.epsilon), dim=0).tolist()
 
 
-def train_split(psn: PSN, train, eval, iterations, epochs, mode, device, perf_metric, use_scheduler=True):
+def train_split(psn: PSN, train, eval, iterations, epochs_per_iteration, mode, device, perf_metric, use_scheduler=True):
     assert (perf_metric in ("acc", "f1"))
     for i in range(1, iterations + 1):
 
@@ -274,10 +273,10 @@ def train_split(psn: PSN, train, eval, iterations, epochs, mode, device, perf_me
             else:  # perf_metric == "f1"
                 return F1Metric(label_shape, device=device)
 
-        metrics_during_training = psn.run(
+        training_metrics = psn.run(
             train,
             BATCH_SIZE,
-            epochs,
+            epochs_per_iteration,
             mode,
             device,
             quantization_noise_std=0.,
@@ -306,239 +305,163 @@ def train_split(psn: PSN, train, eval, iterations, epochs, mode, device, perf_me
             shuffle=False,
             train=False)
 
-        yield (i, metrics_during_training, train_metrics, eval_metrics)
+        yield (
+            i,
+            {
+                "perf_metric": perf_metric,
+                "batch_size": BATCH_SIZE,
+                "training_set_size": len(train),
+                "evaluation_set_size": len(eval),
+                "epochs_per_iteration": epochs_per_iteration,
+                "training": training_metrics,
+                "train": train_metrics,
+                "eval": eval_metrics
+            }
+        )
 
 
-def train_split_no_compression(psn,
-                               train,
-                               eval,
-                               iterations,
-                               epochs_per_iteration,
-                               mode,
-                               device,
-                               perf_metric):
-    curve = {
-        "perf_metric": perf_metric,
-        "batch_size": BATCH_SIZE,
-        "training_set_size": len(train),
-        "evaluation_set_size": len(eval),
-        "epochs_per_iteration": epochs_per_iteration,
-        "metrics": []
-    }
-    for i, _, train_metrics, eval_metrics in \
-            train_split(psn, train, eval, iterations, epochs_per_iteration, mode, device, perf_metric):
-        train_loss, train_perf = train_metrics["total_loss"], train_metrics["perf"]
-        eval_loss, eval_perf = eval_metrics["total_loss"], eval_metrics["perf"]
+def train_split_without_program_synthesis(psn,
+                                          train,
+                                          eval,
+                                          iterations,
+                                          epochs_per_iteration,
+                                          mode,
+                                          device,
+                                          perf_metric):
+    curve = []
+    for i, log in train_split(psn,
+                              train,
+                              eval,
+                              iterations,
+                              epochs_per_iteration,
+                              mode,
+                              device,
+                              perf_metric):
+        train_loss, train_perf = log["train"]["total_loss"], log["train"]["perf"]
+        eval_loss, eval_perf = log["eval"]["total_loss"], log["eval"]["perf"]
         print(
             f"cycle: {i}/{iterations}, "
             f"train loss: {train_loss:.4E}, "
             f"eval loss: {eval_loss:.4E}, "
             f"train perf.: {train_perf:.4f}, "
             f"eval perf.: {eval_perf:.4f}")
-        curve["metrics"].append({
-            "iteration": i,
-            "training_set_metrics": train_metrics,
-            "evaluation_set_metrics": eval_metrics
-        })
+        log["iteration"] = i
+        curve.append(log)
 
     return curve
 
 
-def train_split_compression(psn,
-                            train,
-                            eval,
-                            exploration_timeout,
-                            run_name,
-                            frontier_size,
-                            iterations,
-                            epochs_per_iteration,
-                            mode,
-                            device,
-                            perf_metric,
-                            exploration_intervals=[],
-                            compression_intervals=[],
-                            exploration_eval_timeout=.1,
-                            exploration_eval_attempts=1,
-                            compression_iterations=1,
-                            compression_beam_size=3,
-                            compression_invention_sizes=1,
-                            compression_beta_inversions=1,
-                            compression_verbosity=1):
-    exploration_intervals = [int(v) for v in exploration_intervals]
-    for v in exploration_intervals:
-        assert (v > 0)
-    if exploration_intervals:
-        exploration_interval = exploration_intervals[0]
-        exploration_intervals = exploration_intervals[1:]
-    else:
-        exploration_interval = None
-    compression_intervals = [int(v) for v in compression_intervals]
-    for v in compression_intervals:
-        assert (v > 0)
-    named_compression_intervals = [[f"graph_{run_name}_{i}", interval] for i,
-                                   interval in enumerate(compression_intervals, start=1)]
-    if named_compression_intervals:
-        dsl_name, compression_interval = named_compression_intervals[0]
-        named_compression_intervals = named_compression_intervals[1:]
-    else:
-        dsl_name, compression_interval = None, None
-    curve = {
-        "perf_metric": perf_metric,
-        "batch_size": BATCH_SIZE,
-        "training_set_size": len(train),
-        "evaluation_set_size": len(eval),
-        "epochs_per_iteration": epochs_per_iteration,
-        "exploration": {
-            "exploration_timeout": exploration_timeout,
-            "program_size": PROGRAM_SIZE,
-            "eval_timeout": exploration_eval_timeout,
-            "attempts": exploration_eval_attempts,
-        },
-        "compression": {
-            "iterations": compression_iterations,
-            "beam_size": compression_beam_size,
-            "n_invention_sizes": compression_invention_sizes,
-            "n_beta_inversions": compression_beta_inversions,
-        },
-        "frontier_size": frontier_size,
-        "metrics": []
-    }
+def train_split_with_program_synthesis(psn,
+                                       train,
+                                       eval,
+                                       exploration_timeout,
+                                       frontier_size,
+                                       iterations,
+                                       epochs_per_iteration,
+                                       mode,
+                                       device,
+                                       perf_metric,
+                                       frontier_of_training=True,
+                                       root_dsl_name="dsl",
+                                       exploration_eval_timeout=.1,
+                                       exploration_eval_attempts=1,
+                                       compression_iterations=3,
+                                       compression_beta_inversions=2,
+                                       compression_threads=4,
+                                       compression_verbose=False):
+    log = {"frontier_of_training": True, "metrics": []}
     exploration_kwargs = {
         "eval_timeout": exploration_eval_timeout,
         "attempts": exploration_eval_attempts
     }
     compression_kwargs = {
         "iterations": compression_iterations,
-        "beam_size": compression_beam_size,
-        "n_invention_sizes": compression_invention_sizes,
-        "n_beta_inversions": compression_beta_inversions
+        "n_beta_inversions": compression_beta_inversions,
+        "threads": compression_threads,
+        "verbose": compression_verbose
     }
-    dsl_mass = psn.quantizer.dsl_mass
-    print(f"dsl mass: {dsl_mass:.4f}\nexploring...")
-    new, replaced, total, mass_statistics = psn.exploration(
-        exploration_timeout, PROGRAM_SIZE, **exploration_kwargs)
-    min_mass, max_mass, avg_mass = mass_statistics
-    print(
-        f"\tnew: {new}\n"
-        f"\treplaced: {replaced}\n"
-        f"\ttotal: {total}\n"
-        f"\tmin. mass: {min_mass:.4f}\n"
-        f"\tmax. mass: {max_mass:.4f}\n"
-        f"\tavg mass: {avg_mass:.4f}"
-    )
-    curve["metrics"].append({
-        "activity": "exploration",
-        "iteration": .5,
-        "new": new,
-        "replaced": replaced,
-        "total": total,
-        "min_mass": min_mass,
-        "max_mass": max_mass,
-        "avg_mass": avg_mass
-    })
-    for (i, training_metrics, train_metrics, eval_metrics) in \
-            train_split(psn, train, eval, iterations, epochs_per_iteration, mode, device, perf_metric):
-        print(f"cycle: {i}/{iterations}:")
-        print("\taggregate training statistics:")
-        training_loss, training_div, training_mass, training_perf = (
-            training_metrics["total_loss"],
-            training_metrics["total_diversity"],
-            training_metrics["total_mass"],
-            training_metrics["perf"]
+    if not psn.quantizer.representations:
+        print(f"initial exploration...")
+        exploration_log = psn.exploration(
+            [], exploration_timeout, next_dsl_name=root_dsl_name,
+            **exploration_kwargs)
+        print(
+            f"\tnew: {exploration_log['new']}\n"
+            f"\treplaced: {exploration_log['replaced']}\n"
+            f"\ttotal: {exploration_log['total']}\n"
+            f"\tmin. mass: {exploration_log['min_mass']}\n"
+            f"\tmax. mass: {exploration_log['max_mass']}\n"
+            f"\tavg. mass: {exploration_log['avg_mass']}\n"
+        )
+        exploration_log["iteration"] = 0
+        exploration_log["activity"] = "exploration"
+        log["metrics"].append(exploration_log)
+    for i, psn_log in train_split(psn, train, eval, iterations, epochs_per_iteration, mode, device, perf_metric):
+        print(f"cycle: {i}/{iterations}")
+        print(
+            "\taggregate training state.:\n"
+            f"\t\tloss: {psn_log['training']['total_loss']:.4f}, "
+            f"div.: {psn_log['training']['total_diversity']:.4f}, "
+            f"mass: {psn_log['training']['total_mass']:.4f}, "
+            f"perf.: {psn_log['training']['perf']:.4f}"
         )
         print(
-            f"\t\tloss: {training_loss:.4f}, div.: {training_div:.4f}, mass: {training_mass:.4f}, perf.: {training_perf:.4f}")
-        print("\taggregate training set statistics:")
-        train_loss, train_div, train_mass, train_perf = (
-            train_metrics["total_loss"],
-            train_metrics["total_diversity"],
-            train_metrics["total_mass"],
-            train_metrics["perf"]
+            "\taggregate training set stat.:\n"
+            f"\t\tloss: {psn_log['train']['total_loss']:.4f}, "
+            f"div.: {psn_log['train']['total_diversity']:.4f}, "
+            f"mass: {psn_log['train']['total_mass']:.4f}, "
+            f"perf.: {psn_log['train']['perf']:.4f}"
         )
         print(
-            f"\t\tloss: {train_loss:.4f}, div.: {train_div:.4f}, mass: {train_mass:.4f}, perf.: {train_perf:.4f}")
-        print("\taggregate evaluation set statistics:")
-        eval_loss, eval_div, eval_mass, eval_perf = (
-            eval_metrics["total_loss"],
-            eval_metrics["total_diversity"],
-            eval_metrics["total_mass"],
-            eval_metrics["perf"]
+            "\taggregate evaluation set stat.:\n"
+            f"\t\tloss: {psn_log['eval']['total_loss']:.4f}, "
+            f"div.: {psn_log['eval']['total_diversity']:.4f}, "
+            f"mass: {psn_log['eval']['total_mass']:.4f}, "
+            f"perf.: {psn_log['eval']['perf']:.4f}"
         )
+        psn_log["iteration"] = i
+        psn_log["activity"] = "nn_training"
+        log["metrics"].append(psn_log)
+        print("creating frontier...")
+        if frontier_of_training:
+            repr_usage = psn_log["training"]["representations_usages"]
+        else:
+            repr_usage = psn_log["train"]["representations_usages"]
+        frontier, frontier_log = psn.make_frontier(
+            repr_usage, frontier_size)
         print(
-            f"\t\tloss: {eval_loss:.4f}, div.: {eval_div:.4f}, mass: {eval_mass:.4f}, perf.: {eval_perf:.4f}")
-        curve["network_metrics"].append({
-            "iteration": i,
-            "training_metrics": training_metrics,
-            "training_set_metrics": train_metrics,
-            "evaluation_set_metrics": eval_metrics
-        })
-        performed_compression = False
-        if compression_interval is not None:
-            if compression_interval > 0:
-                compression_interval -= 1
-            if compression_interval == 0:
-                dsl_mass, frontier_div, frontier_mass = psn.compression(
-                    training_metrics["representations_usages"],
-                    frontier_size, dsl_name, **compression_kwargs)
-                print(
-                    f"performed compression..\n"
-                    f"\tdsl mass: {dsl_mass:.4f}\n"
-                    f"\ttruncated frontier: {frontier_div is None and frontier_mass is None}\n"
-                    f"\tfrontier diversity: {frontier_div}\n"
-                    f"\tfrontier mass: {frontier_mass}\n")
-                curve["metrics"].append({
-                    "activity": "compression",
-                    "iteration": i + .25,
-                    "dsl_mass": dsl_mass,
-                    "truncated_frontier": frontier_div is None and frontier_mass is None,
-                    "frontier_div":
-                        frontier_div if frontier_div is not None else training_metrics[
-                            "total_diversity"],
-                    "frontier_mass":
-                        frontier_mass if frontier_mass is not None else training_metrics[
-                            "total_mass"]
-                })
-                if named_compression_intervals:
-                    new_dsl_name, compression_interval = named_compression_intervals[0]
-                    named_compression_intervals = named_compression_intervals[1:]
-                else:
-                    new_dsl_name, compression_interval = None, None
-                if performed_compression:
-                    dsl_name = new_dsl_name
-        if exploration_interval is not None:
-            if exploration_interval > 0:
-                exploration_interval -= 1
-            if exploration_interval == 0:
-                print("exploring...")
-                new, replaced, total, mass_statistics = psn.exploration(
-                    exploration_timeout, PROGRAM_SIZE, **exploration_kwargs)
-                min_mass, max_mass, avg_mass = mass_statistics
-                print(
-                    f"\tnew: {new}\n"
-                    f"\treplaced: {replaced}\n"
-                    f"\ttotal: {total}\n"
-                    f"\tmin. mass: {min_mass:.4f}\n"
-                    f"\tmax. mass: {max_mass:.4f}\n"
-                    f"\tavg mass: {avg_mass:.4f}"
-                )
-                curve["program_synthesis_metrics"].append({
-                    "activity": "exploration",
-                    "iteration": i + .5,
-                    "new": new,
-                    "replaced": replaced,
-                    "total": total,
-                    "min_mass": min_mass,
-                    "max_mass": max_mass,
-                    "avg_mass": avg_mass
-                })
+            f"\tfrontier created from truncated usages: {frontier_log['truncated_usages']},\n"
+            f"\tfrontier diversity: {frontier_log['frontier_div']:.4f},\n"
+            f"\tfrontier mass: {frontier_log['frontier_mass']:.4f}")
+        frontier_log["iteration"] = i
+        frontier_log["activity"] = "frontier_creation"
+        log["metrics"].append(frontier_log)
+        print("compressing...")
+        compression_log = psn.compression(
+            frontier, next_dsl_name=root_dsl_name, **compression_kwargs)
+        print(f"\tsuccessful compression: {compression_log['success']}")
+        if compression_log["success"]:
+            print(f"\tnew dsl mass: {compression_log['next_dsl_mass']}")
+        compression_log["iteration"] = i
+        compression_log["activity"] = "compression"
+        log["metrics"].append(compression_log)
+        print("exploring...")
+        exploration_log = psn.exploration(
+            frontier, exploration_timeout, next_dsl_name=root_dsl_name,
+            **exploration_kwargs)
+        print(
+            f"\tnew: {exploration_log['new']}\n"
+            f"\treplaced: {exploration_log['replaced']}\n"
+            f"\ttotal: {exploration_log['total']}\n"
+            f"\tmin. mass: {exploration_log['min_mass']}\n"
+            f"\tmax. mass: {exploration_log['max_mass']}\n"
+            f"\tavg. mass: {exploration_log['avg_mass']}\n"
+        )
+        exploration_log["iteration"] = i
+        exploration_log["activity"] = "exploration"
+        log["metrics"].append(exploration_log)
 
-                if exploration_intervals:
-                    exploration_interval = exploration_intervals[0]
-                    exploration_intervals = exploration_intervals[1:]
-                else:
-                    exploration_interval = None
-
-    return curve
+    return log
 
 
 def raven_autoencoder_strideconv(device="cuda:0"):
@@ -548,6 +471,7 @@ def raven_autoencoder_strideconv(device="cuda:0"):
               StrideConv_ViT_Encoder,
               NullQuantizer,
               StrideConv_ViT_Decoder,
+              two_stage_quantization=False,
               pre_quantizer_kwargs=pre_strideconv_vit_kwargs,
               post_quantizer_kwargs=post_strideconv_vit_kwargs)
     return psn.to(device)
@@ -562,6 +486,7 @@ def raven_classifier_strideconv(target_dim, device="cuda:0"):
               StrideConv_ViT_Encoder,
               NullQuantizer,
               StrideConv_ViT_Classifier,
+              two_stage_quantization=False,
               pre_quantizer_kwargs=pre_strideconv_vit_kwargs,
               post_quantizer_kwargs=post_quantizer_kwargs)
     return psn.to(device)
@@ -574,6 +499,7 @@ def raven_autoencoder_pixelshuffle(device="cuda:0"):
               PixelShuffle_ViT_Encoder,
               NullQuantizer,
               PixelShuffle_ViT_Decoder,
+              two_stage_quantization=False,
               pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
               post_quantizer_kwargs=post_pixelshuffle_vit_kwargs)
     return psn.to(device)
@@ -588,6 +514,7 @@ def raven_classifier_pixelshuffle(target_dim, device="cuda:0"):
               PixelShuffle_ViT_Encoder,
               NullQuantizer,
               PixelShuffle_ViT_Classifier,
+              two_stage_quantization=False,
               pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
               post_quantizer_kwargs=post_quantizer_kwargs)
     return psn.to(device)
@@ -600,6 +527,7 @@ def raven_vqvae_pixelshuffle(device="cuda:0"):
               PixelShuffle_ViT_Encoder,
               NullQuantizer,
               PixelShuffle_ViT_Decoder,
+              two_stage_quantization=False,
               pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
               post_quantizer_kwargs=post_pixelshuffle_vit_kwargs)
     return psn.to(device)
@@ -614,6 +542,7 @@ def raven_vq_classifier_pixelshuffle(target_dim, device="cuda:0"):
               PixelShuffle_ViT_Encoder,
               NullQuantizer,
               PixelShuffle_ViT_Classifier,
+              two_stage_quantization=False,
               pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
               post_quantizer_kwargs=post_quantizer_kwargs)
     return psn.to(device)
@@ -626,7 +555,7 @@ def raven_psn_autoencoder_pixelshuffle(device="cuda:0"):
               PixelShuffle_ViT_Encoder,
               GraphQuantizer,
               PixelShuffle_ViT_Decoder,
-              program_size=PROGRAM_SIZE,
+              two_stage_quantization=True,
               pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
               quantizer_kwargs={"max_color": 10},
               post_quantizer_kwargs=post_pixelshuffle_vit_kwargs)
@@ -642,7 +571,7 @@ def raven_bottleneck_classifier_pixelshuffle(coordinates_only, n_representations
               PixelShuffle_ViT_Encoder,
               BottleneckQuantizer,
               PixelShuffle_ViT_Classifier,
-              program_size=PROGRAM_SIZE,
+              two_stage_quantization=True,
               pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
               quantizer_kwargs={"coordinates_only": coordinates_only,
                                 "n_representations": n_representations},
@@ -659,7 +588,7 @@ def raven_psn_classifier_pixelshuffle(target_dim, device="cuda:0"):
               PixelShuffle_ViT_Encoder,
               GraphQuantizer,
               PixelShuffle_ViT_Classifier,
-              program_size=PROGRAM_SIZE,
+              two_stage_quantization=True,
               pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
               quantizer_kwargs={"max_color": 10},
               post_quantizer_kwargs=post_quantizer_kwargs)

@@ -36,7 +36,7 @@ class PSN(nn.Module):
                  pre_quantizer,
                  quantizer,
                  post_quantizer,
-                 program_size=None,
+                 two_stage_quantization=True,
                  pre_quantizer_kwargs={},
                  quantizer_kwargs={},
                  post_quantizer_kwargs={},
@@ -45,6 +45,7 @@ class PSN(nn.Module):
         self.C = codebook_dim
         self.pre_quantizer = pre_quantizer(self.C, **pre_quantizer_kwargs)
         self.post_quantizer = post_quantizer(self.C, **post_quantizer_kwargs)
+        self.two_stage_quantization = two_stage_quantization
         assert (self.pre_quantizer.inner_seq_len ==
                 self.post_quantizer.inner_seq_len)
         self.E = self.post_quantizer.inner_seq_len
@@ -53,10 +54,11 @@ class PSN(nn.Module):
 
         self.O = out_codebook_size
         self.out_codebook = self.initial_codebook(self.O, self.C)
-        self.P, self.I = (self.E, self.O) if program_size is None else (1, len(
+        self.P, self.I = (self.E, self.O) if two_stage_quantization else (1, len(
             self.quantizer))
-        self.in_codebook = self.initial_codebook(self.I,
-                                                 (self.E // self.P) * self.C)
+        if two_stage_quantization:
+            self.in_codebook = self.initial_codebook(self.I,
+                                                     (self.E // self.P) * self.C)
         self.out_restart_manager = RestartManager(8, self.O)
         self.in_restarts: Optional[Tuple[th.Tensor, List[int]]] = None
         self.out_restarts: Optional[Tuple[th.Tensor, List[int]]] = None
@@ -70,7 +72,11 @@ class PSN(nn.Module):
         return codebook
 
     def forward(self, x, y, quantization_noise_std, mode):
-        assert (mode in ("none", "nearest", "learned"))
+        if self.two_stage_quantization:
+            assert (mode in ("none", "nearest"))
+        else:
+            assert (mode not in ("none", "nearest"))
+            mode = "learned"
         if mode == "none":
             if self.in_restarts is not None:
                 self.in_restarts = None
@@ -345,20 +351,11 @@ class PSN(nn.Module):
             self.out_restarts = None
 
     def exploration(self,
-                    frontier_size,
+                    frontier,
                     exploration_timeout,
-                    next_dsl_name=None,
-                    repr_usage=None,
+                    next_dsl_name="dsl",
                     **kwargs):
-        prev_dsl_name = self.quantizer.dsl_name
-        if repr_usage is None:
-            repr_usage = self.quantizer.repr_usage
-        frontier, frontier_statistics = self._make_frontier(
-            repr_usage, frontier_size)
-        frontier_div, frontier_mass = \
-            frontier_statistics if frontier_statistics is not None else (
-                None, None)
-        new, replaced, mass_statistics, n_enumerated, max_description_length = self.quantizer.explore(
+        log = self.quantizer.explore(
             frontier, next_dsl_name, exploration_timeout, **kwargs)
         if len(self.quantizer) != self.I:
             I = len(self.quantizer)
@@ -370,72 +367,43 @@ class PSN(nn.Module):
             for code in range(self.I):
                 self.out_restart_manager.add_code(code)
             self.in_restarts, self.out_restarts = None, None
-        result = {
-            "exploration_timeout": exploration_timeout,
-            "new": new,
-            "replaced": replaced,
-            "total": self.I,
-            "n_enumerated": n_enumerated,
-            "maximum_description_length": max_description_length,
-            "frontier_size": frontier_size,
-            "truncated_frontier": frontier_statistics is None,
-            "frontier_div": frontier_div,
-            "frontier_mass": frontier_mass,
-            "min_mass": mass_statistics[0],
-            "max_mass": mass_statistics[1],
-            "avg_mass": mass_statistics[2],
-            "prev_dsl_name": prev_dsl_name,
-            "next_dsl_name": self.quantizer.dsl_name}
-        result.update(**kwargs)
-        return result
+        return log
 
     def compression(self,
-                    frontier_size,
-                    repr_usage=None,
-                    next_dsl_name=None,
+                    frontier,
+                    next_dsl_name="dsl",
                     stitch_compression=True,
                     **kwargs):
-        prev_dsl_name = self.quantizer.dsl_name
-        if repr_usage is None:
-            repr_usage = self.quantizer.repr_usage
-        frontier, frontier_statistics = self._make_frontier(
-            repr_usage, frontier_size)
-        frontier_div, frontier_mass = \
-            frontier_statistics if frontier_statistics is not None else (
-                None, None)
         if stitch_compression:
-            dsl_mass = self.quantizer.stitch_compress(
+            log = self.quantizer.stitch_compress(
                 frontier, next_dsl_name, **kwargs)
         else:
-            dsl_mass = self.quantizer.dreamcoder_compress(
+            log = self.quantizer.dreamcoder_compress(
                 frontier, next_dsl_name, **kwargs)
-        result = {
-            "next_dsl_mass": dsl_mass,
-            "frontier_size": frontier_size,
-            "truncated_frontier": frontier_statistics is None,
-            "frontier_div": frontier_div,
-            "frontier_mass": frontier_mass,
-            "prev_dsl_name": prev_dsl_name,
-            "next_dsl_name": self.quantizer.dsl_name,
-            "stitch_compression": stitch_compression}
-        result.update(**kwargs)
-        return result
+        log.update(stitch_compression=stitch_compression)
+        return log
 
-    def _make_frontier(self, repr_usage, frontier_size):
+    def make_frontier(self, repr_usage, frontier_size):
+        log = {}
+        self.quantizer.repr_usage = repr_usage
         if len(repr_usage) > frontier_size:
+            log.update(truncated_usages=True)
             total = sum(repr_usage.values())
             frontier = np.random.choice(
                 list(repr_usage.keys()),
                 int(frontier_size),
                 replace=True,
                 p=[count / total for count in repr_usage.values()]).tolist()
-            frontier_statistics = (
-                len(repr_usage) / len(self.quantizer),
-                self.quantizer.mass_of_representations(frontier)
-            )
+            log.update(frontier_div=len(
+                repr_usage) / len(self.quantizer))
+            log.update(
+                frontier_mass=self.quantizer.mass_of_representations(frontier))
         else:
+            log.update(truncated_usages=False)
             frontier = []
             for filename, count in repr_usage.items():
                 frontier += [filename] * count
-            frontier_statistics = None
-        return frontier, frontier_statistics
+            log.update(frontier_div=len(repr_usage) / len(self.quantizer))
+            log.update(
+                frontier_mass=self.quantizer.mass_of_representations(frontier))
+        return frontier, log

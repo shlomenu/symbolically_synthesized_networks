@@ -58,7 +58,7 @@ let () =
   S.to_file (SU.to_string @@ SU.member "next_dsl_file" j) (yojson_of_dsl dsl') ;
   S.to_channel Out_channel.stdout
   @@ `Assoc
-       [ ("new_dsl_mass", yojson_of_int dsl'.mass)
+       [ ("next_dsl_mass", yojson_of_int dsl'.mass)
        ; ( "replacements"
          , yojson_of_list (yojson_of_list yojson_of_string)
            @@ List.map replacements ~f:(fun (prev, cur) -> [prev; cur]) ) ]

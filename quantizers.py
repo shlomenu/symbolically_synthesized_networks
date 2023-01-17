@@ -178,29 +178,37 @@ class GraphQuantizer(nn.Module):
                 exploration_timeout,
                 *,
                 eval_timeout,
-                attempts):
+                eval_attempts):
+        next_dsl_name = self._form_dsl_name(next_dsl_name)
         if next_dsl_name is None:
             parts = self.dsl_name.split("_")
             next_dsl_name = "_".join(
                 ("_".join(parts[:-1]), str(int(parts[-1]) + 1)))
-        resp = explore(self.name_of_domain,
-                       frontier,
-                       os.path.join(self.dsl_save_path,
-                                    f"{self.dsl_name}.json"),
-                       os.path.join(self.dsl_save_path,
-                                    f"{next_dsl_name}.json"),
-                       self.representations_save_path,
-                       exploration_timeout,
-                       eval_timeout=eval_timeout,
-                       attempts=attempts,
-                       max_color=self.max_color)
+        result = explore(self.name_of_domain,
+                         frontier,
+                         os.path.join(self.dsl_save_path,
+                                      f"{self.dsl_name}.json"),
+                         os.path.join(self.dsl_save_path,
+                                      f"{next_dsl_name}.json"),
+                         self.representations_save_path,
+                         exploration_timeout,
+                         eval_timeout=eval_timeout,
+                         eval_attempts=eval_attempts,
+                         max_color=self.max_color)
+        self._load_representations(dict(result["replacements"]))
+        del result["replacements"]
+        result.update(
+            total=len(self),
+            exploration_timeout=exploration_timeout,
+            min_mass=self.min_mass,
+            max_mass=self.max_mass,
+            avg_mass=self.avg_mass,
+            prev_dsl_name=self.dsl_name,
+            next_dsl_name=next_dsl_name,
+            eval_timeout=eval_timeout,
+            eval_attempts=eval_attempts)
         self.dsl_name = next_dsl_name
-        return (
-            resp["new"],
-            resp["replaced"],
-            self._load_representations(dict(resp["replacements"])),
-            resp["n_enumerated"],
-            resp["max_description_length"])
+        return result
 
     def dreamcoder_compress(self,
                             frontier,
@@ -215,32 +223,42 @@ class GraphQuantizer(nn.Module):
                             dsl_size_penalty,
                             invention_name_prefix,
                             verbosity=0):
-        if next_dsl_name is None:
-            parts = self.dsl_name.split("_")
-            next_dsl_name = "_".join(
-                ("_".join(parts[:-1]), str(int(parts[-1]) + 1)))
-        resp = dreamcoder_compress(frontier,
-                                   self.name_of_domain,
-                                   os.path.join(self.dsl_save_path,
-                                                f"{self.dsl_name}.json"),
-                                   os.path.join(self.dsl_save_path,
-                                                f"{next_dsl_name}.json"),
-                                   self.representations_save_path,
-                                   iterations=iterations,
-                                   beam_size=beam_size,
-                                   n_beta_inversions=n_beta_inversions,
-                                   n_invention_sizes=n_invention_sizes,
-                                   n_exactly_scored=n_exactly_scored,
-                                   primitive_size_penalty=primitive_size_penalty,
-                                   dsl_size_penalty=dsl_size_penalty,
-                                   invention_name_prefix=invention_name_prefix,
-                                   verbosity=verbosity,
-                                   max_color=self.max_color)
-        if resp["new_dsl_mass"]:
+        next_dsl_name = self._form_dsl_name(next_dsl_name)
+        result = dreamcoder_compress(frontier,
+                                     self.name_of_domain,
+                                     os.path.join(self.dsl_save_path,
+                                                  f"{self.dsl_name}.json"),
+                                     os.path.join(self.dsl_save_path,
+                                                  f"{next_dsl_name}.json"),
+                                     self.representations_save_path,
+                                     iterations=iterations,
+                                     beam_size=beam_size,
+                                     n_beta_inversions=n_beta_inversions,
+                                     n_invention_sizes=n_invention_sizes,
+                                     n_exactly_scored=n_exactly_scored,
+                                     primitive_size_penalty=primitive_size_penalty,
+                                     dsl_size_penalty=dsl_size_penalty,
+                                     invention_name_prefix=invention_name_prefix,
+                                     verbosity=verbosity,
+                                     max_color=self.max_color)
+        result.update(
+            iterations=iterations,
+            beam_size=beam_size,
+            n_beta_inversions=n_beta_inversions,
+            n_invention_sizes=n_invention_sizes,
+            n_exactly_scored=n_exactly_scored,
+            primitives_size_penalty=primitive_size_penalty,
+            dsl_size_penalty=dsl_size_penalty,
+            invention_name_prefix=invention_name_prefix)
+        if result["success"]:
+            result.update(
+                prev_dsl_name=self.dsl_name,
+                next_dsl_name=next_dsl_name)
+            self._load_representations(dict(result["replacements"]))
+            del result["replacements"]
             self.dsl_name = next_dsl_name
-            self.dsl_mass = resp["new_dsl_mass"]
-            self._load_representations(dict(resp["replacements"]))
-        return resp["new_dsl_mass"]
+            self.dsl_mass = result["next_dsl_mass"]
+        return result
 
     def stitch_compress(self,
                         frontier,
@@ -251,10 +269,7 @@ class GraphQuantizer(nn.Module):
                         threads,
                         verbose,
                         **stitch_kwargs):
-        if next_dsl_name is None:
-            parts = self.dsl_name.split("_")
-            next_dsl_name = "_".join(
-                ("_".join(parts[:-1]), str(int(parts[-1]) + 1)))
+        next_dsl_name = self._form_dsl_name(next_dsl_name)
         frontier_programs = []
         for filename in frontier:
             with open(os.path.join(self.representations_save_path, filename)) as f:
@@ -267,9 +282,15 @@ class GraphQuantizer(nn.Module):
             threads=threads,
             verbose=verbose,
             **stitch_kwargs)
+        result = {
+            "iterations": iterations,
+            "n_beta_inversions": n_beta_inversions
+        }
+        result.update(**stitch_kwargs)
         invented_primitives = [[name, body] for name, body in sorted(
             ((a.name, a.body) for a in res.abstractions), key=lambda a: int(a[0].split("_")[-1]))]
         if invented_primitives:
+            result.update(success=True)
             replacements = [[prev, cur] for prev, cur in zip(
                 res.json["original"], res.json["rewritten"]) if prev != cur]
             non_frontier = list(set(self.representations) - set(frontier))
@@ -283,12 +304,26 @@ class GraphQuantizer(nn.Module):
                 os.path.join(self.dsl_save_path, f"{self.dsl_name}.json"),
                 os.path.join(self.dsl_save_path, f"{next_dsl_name}.json"),
                 self.representations_save_path)
-            self.dsl_name = next_dsl_name
-            self.dsl_mass = resp["new_dsl_mass"]
             self._load_representations(dict(resp["replacements"]))
-            return resp["new_dsl_mass"]
+            del resp["replacements"]
+            result.update(resp)
+            result.update(
+                prev_dsl_name=self.dsl_name,
+                next_dsl_name=next_dsl_name)
+            self.dsl_name = next_dsl_name
+            self.dsl_mass = resp["next_dsl_mass"]
         else:
-            return None
+            result.update(success=False)
+        return result
+
+    def _form_dsl_name(self, name):
+        parts = self.dsl_name.split("_")
+        prev_root, prev_number = "_".join(parts[:-1]), int(parts[-1])
+        next_number = str(prev_number + 1)
+        if name is None:
+            return "_".join(["_".join(prev_root), next_number])
+        else:
+            return "_".join([name, next_number])
 
     def _load_representations(self, replacements):
         self.replacements = replacements
@@ -305,7 +340,6 @@ class GraphQuantizer(nn.Module):
         self.min_mass = min(self.masses.values())
         self.max_mass = max(self.masses.values())
         self.avg_mass = sum(self.masses.values()) / len(self.masses)
-        return self.min_mass, self.max_mass, self.avg_mass
 
     def _fetch_meta(self):
         masses, programs = {}, {}
