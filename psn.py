@@ -54,8 +54,8 @@ class PSN(nn.Module):
 
         self.O = out_codebook_size
         self.out_codebook = self.initial_codebook(self.O, self.C)
-        self.P, self.I = (self.E, self.O) if two_stage_quantization else (1, len(
-            self.quantizer))
+        self.P, self.I = (1, len(
+            self.quantizer)) if self.two_stage_quantization else (self.E, self.O)
         if two_stage_quantization:
             self.in_codebook = self.initial_codebook(self.I,
                                                      (self.E // self.P) * self.C)
@@ -73,10 +73,10 @@ class PSN(nn.Module):
 
     def forward(self, x, y, quantization_noise_std, mode):
         if self.two_stage_quantization:
-            assert (mode in ("none", "nearest"))
-        else:
             assert (mode not in ("none", "nearest"))
             mode = "learned"
+        else:
+            assert (mode in ("none", "nearest"))
         if mode == "none":
             if self.in_restarts is not None:
                 self.in_restarts = None
