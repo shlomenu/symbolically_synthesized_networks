@@ -106,7 +106,6 @@ class GraphQuantizer(nn.Module):
             self.dsl_mass = dsl["mass"]
         self.representations = sorted(
             os.listdir(self.representations_save_path))
-        self.repr_usage = defaultdict(int)
         self.restart_manager = RestartManager(
             idleness_limit, len(self.representations))
         self.masses, self.programs = self._fetch_meta()
@@ -329,9 +328,6 @@ class GraphQuantizer(nn.Module):
         self.replacements = replacements
         self.representations = [(self.replacements[file] if file in self.replacements else file)
                                 for file in self.representations]
-        self.repr_usage = dict(
-            ((replacements[file] if file in self.replacements else file), count)
-            for file, count in self.repr_usage.items())
         self.representations.extend(
             set(os.listdir(self.representations_save_path)) - set(self.representations))
         for code in range(len(self)):

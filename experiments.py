@@ -363,16 +363,17 @@ def train_split_with_program_synthesis(psn,
                                        perf_metric,
                                        frontier_of_training=True,
                                        root_dsl_name="dsl",
+                                       use_scheduler=True,
                                        exploration_eval_timeout=.1,
                                        exploration_eval_attempts=1,
                                        compression_iterations=3,
                                        compression_beta_inversions=2,
                                        compression_threads=4,
-                                       compression_verbose=False):
+                                       compression_verbose=True):
     log = {"frontier_of_training": True, "metrics": []}
     exploration_kwargs = {
         "eval_timeout": exploration_eval_timeout,
-        "attempts": exploration_eval_attempts
+        "eval_attempts": exploration_eval_attempts
     }
     compression_kwargs = {
         "iterations": compression_iterations,
@@ -396,7 +397,18 @@ def train_split_with_program_synthesis(psn,
         exploration_log["iteration"] = 0
         exploration_log["activity"] = "exploration"
         log["metrics"].append(exploration_log)
-    for i, psn_log in train_split(psn, train, eval, iterations, epochs_per_iteration, mode, device, perf_metric):
+        psn.quantizer.clear_visualizations()
+        psn.quantizer.visualize()
+    for i, psn_log in train_split(
+            psn,
+            train,
+            eval,
+            iterations,
+            epochs_per_iteration,
+            mode,
+            device,
+            perf_metric,
+            use_scheduler=use_scheduler):
         print(f"cycle: {i}/{iterations}")
         print(
             "\taggregate training state.:\n"
@@ -445,6 +457,9 @@ def train_split_with_program_synthesis(psn,
         compression_log["iteration"] = i
         compression_log["activity"] = "compression"
         log["metrics"].append(compression_log)
+        repl = psn.quantizer.replacements
+        frontier = [(repl[file] if file in repl else file)
+                    for file in frontier]
         print("exploring...")
         exploration_log = psn.exploration(
             frontier, exploration_timeout, next_dsl_name=root_dsl_name,
@@ -460,6 +475,11 @@ def train_split_with_program_synthesis(psn,
         exploration_log["iteration"] = i
         exploration_log["activity"] = "exploration"
         log["metrics"].append(exploration_log)
+        repl = psn.quantizer.replacements
+        frontier = [(repl[file] if file in repl else file)
+                    for file in frontier]
+        psn.quantizer.clear_visualizations()
+        psn.quantizer.visualize(frontier)
 
     return log
 
