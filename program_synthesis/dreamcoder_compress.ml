@@ -1,9 +1,5 @@
 open Core
 open Antireduce
-open Frontier
-open Dsl
-open Compression
-open Domains
 module S = Yojson.Safe
 module SU = Yojson.Safe.Util
 
@@ -14,7 +10,7 @@ let () =
   in
   let domain = SU.to_string @@ SU.member "domain" j in
   let dsl =
-    dsl_of_yojson @@ S.from_file @@ SU.to_string @@ SU.member "dsl_file" j
+    Dsl.t_of_yojson @@ S.from_file @@ SU.to_string @@ SU.member "dsl_file" j
   in
   let next_dsl_file = SU.to_string @@ SU.member "next_dsl_file" j in
   let iterations = SU.to_int @@ SU.member "iterations" j in
@@ -31,23 +27,24 @@ let () =
   let parse = Domains.dsl_insensitive_parser_of_domain domain j in
   let representations_dir = SU.to_string @@ SU.member "representations_dir" j in
   let frontier, paths, file_contents =
-    load_representations_from parse representations_dir frontier
+    Frontier.load_representations_from parse representations_dir frontier
   in
   let invention_name_prefix =
     SU.to_string @@ SU.member "invention_name_prefix" j
   in
   let verbose = SU.to_int @@ SU.member "verbosity" j in
-  compression_verbosity := verbose ;
+  Compression.compression_verbosity := verbose ;
   let dsl', frontier' =
-    compress ~invention_name_prefix ~inlining:true ~iterations
+    Compression.compress ~invention_name_prefix ~inlining:true ~iterations
       ~n_beta_inversions ~n_invention_sizes ~n_exactly_scored
       ~primitive_size_penalty ~dsl_size_penalty ~beam_size
-      ~request:(request_of_domain domain) ~dsl ~frontier
+      ~request:(Domains.request_of_domain domain)
+      ~dsl ~frontier
   in
   if List.length dsl'.library > List.length dsl.library then (
-    S.to_file next_dsl_file @@ yojson_of_dsl dsl' ;
+    S.to_file next_dsl_file @@ Dsl.yojson_of_t dsl' ;
     let replacements =
-      overwrite_representations frontier' paths file_contents
+      Frontier.overwrite_representations frontier' paths file_contents
     in
     S.to_channel Out_channel.stdout
       (`Assoc

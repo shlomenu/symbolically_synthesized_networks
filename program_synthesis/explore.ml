@@ -1,8 +1,5 @@
 open Core
 open Antireduce
-open Frontier
-open Dsl
-open Domains
 module S = Yojson.Safe
 module SU = Yojson.Safe.Util
 
@@ -18,24 +15,27 @@ let () =
     List.map ~f:SU.to_string @@ SU.to_list @@ SU.member "frontier" j
   in
   let frontier, _, _ =
-    load_representations_from parse representations_dir frontier
+    Frontier.load_representations_from parse representations_dir frontier
   in
   let dsl =
     let weighted_dsl =
-      dsl_of_yojson @@ S.from_file @@ SU.to_string @@ SU.member "dsl_file" j
+      Dsl.t_of_yojson @@ S.from_file @@ SU.to_string @@ SU.member "dsl_file" j
     in
     if List.is_empty frontier then weighted_dsl
     else
       let uniform_dsl =
-        dedup_dsl_of_primitives weighted_dsl.state_type
-        @@ primitives_of_dsl weighted_dsl
+        Dsl.of_primitives_dedup weighted_dsl.state_type
+        @@ Dsl.to_primitives weighted_dsl
       in
-      fst @@ inside_outside uniform_dsl (request_of_domain domain) frontier
+      fst
+      @@ Factorization.inside_outside uniform_dsl
+           (Domains.request_of_domain domain)
+           frontier
   in
   let next_dsl_file = SU.to_string @@ SU.member "next_dsl_file" j in
-  S.to_file next_dsl_file @@ Dsl.yojson_of_dsl dsl ;
+  S.to_file next_dsl_file @@ Dsl.yojson_of_t dsl ;
   let n_new, n_replaced, replacements, n_enumerated, max_ll =
-    explore domain ~exploration_timeout ~eval_timeout ~attempts ~dsl
+    Domains.explore domain ~exploration_timeout ~eval_timeout ~attempts ~dsl
       ~representations_dir j
   in
   S.to_channel Out_channel.stdout

@@ -1,6 +1,5 @@
 open Core
 open Antireduce
-open Dsl
 module Graph = Antireduce_graphs
 
 let explore = function
@@ -20,8 +19,9 @@ let dsl_sensitive_parser_of_domain = function
       fun dsl ->
         Graph.parse_program_exn ~primitives:(fun _ ->
             Hashtbl.of_alist_exn (module String)
-            @@ List.map dsl.library ~f:(fun ent ->
-                   (ent.stitch_name, primitive_of_entry ent) ) )
+            @@ List.map ~f:(fun ent ->
+                   (Dsl_entry.stitch_name ent, Dsl_entry.to_primitive ent) )
+            @@ Dsl.library dsl )
   | name_of_domain ->
       failwith @@ Format.sprintf "unrecognized domain: %s" name_of_domain
 
@@ -30,8 +30,9 @@ let stitch_invention_parser_of_domain = function
       fun dsl ->
         Graph.parse_stitch_invention_exn ~primitives:(fun _ ->
             Hashtbl.of_alist_exn (module String)
-            @@ List.map dsl.library ~f:(fun ent ->
-                   (ent.stitch_name, primitive_of_entry ent) ) )
+            @@ List.map ~f:(fun ent ->
+                   (Dsl_entry.stitch_name ent, Dsl_entry.to_primitive ent) )
+            @@ Dsl.library dsl )
   | name_of_domain ->
       failwith @@ Format.sprintf "unrecognized domain: %s" name_of_domain
 

@@ -1,8 +1,5 @@
 open Core
 open Antireduce
-open Frontier
-open Dsl
-open Program
 module S = Yojson.Safe
 module SU = Yojson.Safe.Util
 
@@ -14,7 +11,7 @@ let () =
     |> list_of_yojson (list_of_yojson string_of_yojson)
     |> List.fold
          ~init:
-           ( dsl_of_yojson @@ S.from_file @@ SU.to_string
+           ( Dsl.t_of_yojson @@ S.from_file @@ SU.to_string
            @@ SU.member "dsl_file" j )
          ~f:(fun dsl' inv ->
            let parse =
@@ -23,20 +20,20 @@ let () =
            let invented_primitive =
              match inv with
              | [name; body] ->
-                 invention name @@ parse body
+                 Program.invention name @@ parse body
              | _ ->
                  failwith
                    "incorporate_stitch: improperly formatted invented \
                     primitives: expected list of lists of [name, body]"
            in
-           dedup_dsl_of_primitives dsl'.state_type
-             (invented_primitive :: primitives_of_dsl dsl') )
+           Dsl.of_primitives_dedup dsl'.state_type
+             (invented_primitive :: Dsl.to_primitives dsl') )
   in
   let replacements =
     let parse = Domains.dsl_sensitive_parser_of_domain domain dsl' j in
     let path_of =
       Fn.compose
-        (repr_path @@ SU.to_string @@ SU.member "representations_dir" j)
+        (Frontier.repr_path @@ SU.to_string @@ SU.member "representations_dir" j)
         parse
     in
     let paths, file_contents, cur_programs =
@@ -53,9 +50,9 @@ let () =
                   rewritten_program]" )
       |> List.unzip3
     in
-    overwrite_representations cur_programs paths file_contents
+    Frontier.overwrite_representations cur_programs paths file_contents
   in
-  S.to_file (SU.to_string @@ SU.member "next_dsl_file" j) (yojson_of_dsl dsl') ;
+  S.to_file (SU.to_string @@ SU.member "next_dsl_file" j) (Dsl.yojson_of_t dsl') ;
   S.to_channel Out_channel.stdout
   @@ `Assoc
        [ ("next_dsl_mass", yojson_of_int dsl'.mass)
