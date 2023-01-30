@@ -24,7 +24,7 @@ let () =
   in
   let dsl_size_penalty = SU.to_float @@ SU.member "dsl_size_penalty" j in
   let n_beta_inversions = SU.to_int @@ SU.member "n_beta_inversions" j in
-  let parse = Domains.dsl_insensitive_parser_of_domain domain j in
+  let parse = Domains.dsl_insensitive_parser_of_domain domain in
   let representations_dir = SU.to_string @@ SU.member "representations_dir" j in
   let frontier, paths, file_contents =
     Frontier.load_representations_from parse representations_dir frontier
@@ -41,17 +41,19 @@ let () =
       ~request:(Domains.request_of_domain domain)
       ~dsl ~frontier
   in
-  if List.length dsl'.library > List.length dsl.library then (
+  let n_added = List.length dsl'.library - List.length dsl.library in
+  if n_added > 0 then (
     S.to_file next_dsl_file @@ Dsl.yojson_of_t dsl' ;
     let replacements =
       Frontier.overwrite_representations frontier' paths file_contents
     in
     S.to_channel Out_channel.stdout
       (`Assoc
-        [ ("success", yojson_of_bool true)
+        [ ("n_added", yojson_of_int n_added)
         ; ("next_dsl_mass", yojson_of_int dsl'.mass)
         ; ( "replacements"
           , yojson_of_list (yojson_of_list yojson_of_string)
             @@ List.map replacements ~f:(fun (prev, cur) -> [prev; cur]) ) ] ) )
   else
-    S.to_channel Out_channel.stdout @@ `Assoc [("success", yojson_of_bool false)]
+    S.to_channel Out_channel.stdout
+    @@ `Assoc [("n_added", yojson_of_int n_added)]

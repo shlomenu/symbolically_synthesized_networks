@@ -9,7 +9,7 @@ let () =
   let eval_timeout = SU.to_number @@ SU.member "eval_timeout" j in
   let attempts = SU.to_int @@ SU.member "attempts" j in
   let domain = SU.to_string @@ SU.member "domain" j in
-  let parse = Domains.dsl_insensitive_parser_of_domain domain j in
+  let parse = Domains.dsl_insensitive_parser_of_domain domain in
   let representations_dir = SU.to_string @@ SU.member "representations_dir" j in
   let frontier =
     List.map ~f:SU.to_string @@ SU.to_list @@ SU.member "frontier" j
@@ -24,7 +24,7 @@ let () =
     if List.is_empty frontier then weighted_dsl
     else
       let uniform_dsl =
-        Dsl.of_primitives_dedup weighted_dsl.state_type
+        Dsl.of_primitives weighted_dsl.state_type
         @@ Dsl.to_primitives weighted_dsl
       in
       fst

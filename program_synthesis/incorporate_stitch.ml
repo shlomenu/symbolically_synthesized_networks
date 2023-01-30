@@ -14,9 +14,7 @@ let () =
            ( Dsl.t_of_yojson @@ S.from_file @@ SU.to_string
            @@ SU.member "dsl_file" j )
          ~f:(fun dsl' inv ->
-           let parse =
-             Domains.stitch_invention_parser_of_domain domain dsl' j
-           in
+           let parse = Domains.stitch_invention_parser_of_domain domain dsl' in
            let invented_primitive =
              match inv with
              | [name; body] ->
@@ -26,11 +24,11 @@ let () =
                    "incorporate_stitch: improperly formatted invented \
                     primitives: expected list of lists of [name, body]"
            in
-           Dsl.of_primitives_dedup dsl'.state_type
+           Dsl.of_primitives dsl'.state_type
              (invented_primitive :: Dsl.to_primitives dsl') )
   in
   let replacements =
-    let parse = Domains.dsl_sensitive_parser_of_domain domain dsl' j in
+    let parse = Domains.dsl_sensitive_parser_of_domain domain dsl' in
     let path_of =
       Fn.compose
         (Frontier.repr_path @@ SU.to_string @@ SU.member "representations_dir" j)
@@ -42,7 +40,19 @@ let () =
       |> List.map ~f:(function
            | [prev; cur] ->
                let path = path_of prev in
-               (path, S.from_file path, parse cur)
+               let file_content =
+                 try S.from_file path
+                 with e ->
+                   Format.eprintf
+                     "issue loading data for program \n\
+                      \t%s\n\
+                      replaced by\n\
+                      \t%s\n"
+                     (Program.to_string @@ parse prev)
+                     (Program.to_string @@ parse cur) ;
+                   raise e
+               in
+               (path, file_content, parse cur)
            | _ ->
                failwith
                  "incorporate_stitch: improperly formatted replacements: \
