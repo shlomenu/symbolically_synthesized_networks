@@ -367,6 +367,8 @@ class PSN(nn.Module):
             for code in range(self.I):
                 self.out_restart_manager.add_code(code)
             self.in_restarts, self.out_restarts = None, None
+            self.out_codebook = self.initial_codebook(self.O, self.C).to(
+                self.out_codebook.weight.device)
         return log
 
     def compression(self,

@@ -2,7 +2,6 @@ import os
 import pickle
 from copy import deepcopy
 from functools import lru_cache
-from collections import defaultdict
 
 import torch as th
 import numpy as np
@@ -451,8 +450,9 @@ def train_split_with_program_synthesis(psn,
         print("compressing...")
         compression_log = psn.compression(
             frontier, next_dsl_name=root_dsl_name, **compression_kwargs)
-        print(f"\tsuccessful compression: {compression_log['success']}")
-        if compression_log["success"]:
+        print(
+            f"\nnumber of primitives added during compression: {compression_log['n_added']}")
+        if compression_log["n_added"] > 0:
             print(f"\tnew dsl mass: {compression_log['next_dsl_mass']}")
         compression_log["iteration"] = i
         compression_log["activity"] = "compression"
@@ -568,7 +568,7 @@ def raven_vq_classifier_pixelshuffle(target_dim, device="cuda:0"):
     return psn.to(device)
 
 
-def raven_psn_autoencoder_pixelshuffle(device="cuda:0"):
+def raven_psn_autoencoder_pixelshuffle(max_conn, device="cuda:0"):
     psn = PSN(OUT_CODEBOOK_SIZE,
               CODEBOOK_DIM,
               INITIAL_DSL,
@@ -577,7 +577,7 @@ def raven_psn_autoencoder_pixelshuffle(device="cuda:0"):
               PixelShuffle_ViT_Decoder,
               two_stage_quantization=True,
               pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
-              quantizer_kwargs={"max_color": 10},
+              quantizer_kwargs={"max_conn": max_conn},
               post_quantizer_kwargs=post_pixelshuffle_vit_kwargs)
     return psn.to(device)
 
@@ -599,7 +599,7 @@ def raven_bottleneck_classifier_pixelshuffle(coordinates_only, n_representations
     return psn.to(device)
 
 
-def raven_psn_classifier_pixelshuffle(target_dim, device="cuda:0"):
+def raven_psn_classifier_pixelshuffle(target_dim, max_conn, device="cuda:0"):
     post_quantizer_kwargs = deepcopy(post_pixelshuffle_vit_kwargs)
     post_quantizer_kwargs.update(target_dim=target_dim)
     psn = PSN(OUT_CODEBOOK_SIZE,
@@ -610,6 +610,6 @@ def raven_psn_classifier_pixelshuffle(target_dim, device="cuda:0"):
               PixelShuffle_ViT_Classifier,
               two_stage_quantization=True,
               pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
-              quantizer_kwargs={"max_color": 10},
+              quantizer_kwargs={"max_conn": max_conn},
               post_quantizer_kwargs=post_quantizer_kwargs)
     return psn.to(device)

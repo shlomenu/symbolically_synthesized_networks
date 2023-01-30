@@ -75,6 +75,7 @@ def dreamcoder_compress(frontier,
 
 
 def stitch_compress(frontier,
+                    previous_abstractions,
                     *,
                     iterations,
                     n_beta_inversions,
@@ -82,8 +83,9 @@ def stitch_compress(frontier,
                     verbose,
                     **stitch_kwargs):
     stitch_kwargs.update(dynamic_batch=True)
-    return stitch_core.compress(frontier, iterations, max_arity=n_beta_inversions,
-                                threads=threads, silent=(not verbose), **stitch_kwargs)
+    return stitch_core.compress(frontier, iterations, max_arity=n_beta_inversions, threads=threads,
+                                silent=(not verbose), previous_abstractions=previous_abstractions,
+                                **stitch_kwargs)
 
 
 def stitch_rewrite(non_frontier,
@@ -145,23 +147,6 @@ def save_reconstruction(filename, autoencoder_psn, dataset, i,
     reconstructed_img = .5 * (out + 1.)
     save_image(reconstructed_img, filename)
     return reconstructed_img
-
-
-# x11 color scheme
-COLORS = [
-    "red",
-    "green",
-    "blue",
-    "cyan",
-    "brown",
-    "gold",
-    "indigo",
-    "lemonchiffon",
-    "magenta",
-    "midnightblue",
-    "slategrey",
-    "yellow",
-]
 
 
 class Timing(object):

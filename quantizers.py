@@ -1,4 +1,3 @@
-from collections import defaultdict
 import os
 import json
 from typing import List
@@ -7,76 +6,82 @@ import dgl
 import pygraphviz as pgv
 import torch as th
 import torch.nn as nn
-import torch.nn.functional as F
 from einops import rearrange
-from einops.layers.torch import Rearrange
 from vit_pytorch.simple_vit import Transformer
 
 from restart_manager import RestartManager
-from utilities import COLORS, explore, dreamcoder_compress, incorporate_stitch, stitch_compress, stitch_rewrite
-from networks import QuantizationEmbedding
+from utilities import explore, dreamcoder_compress, incorporate_stitch, stitch_compress, stitch_rewrite
 
 DSL_DIR = "dsls"
 REPRESENTATIONS_DIR = "representations"
 VISUALIZATION_DIR = "visualizations"
 
 
-def node_tensor_tuple_of_json(graph_json):
-    edges_1, edges_2 = [], []
-    for [[node_1, _color], node_2] in graph_json["forward_edges"]:
+def graph_data_of_json(graph_json):
+    edges_1, edges_2, nodes, efeats, n_elt = [], [], set(), [], -1
+    for [[node_1, port], [edge, node_2]] in graph_json["edges"]:
         edges_1.append(node_1)
         edges_2.append(node_2)
-    for [[node_1, _color], node_2] in graph_json["backward_edges"]:
-        edges_1.append(node_1)
-        edges_2.append(node_2)
-    return th.tensor(edges_1), th.tensor(edges_2)
+        efeats.append([edge, port + 1])
+        nodes.add(node_1)
+        nodes.add(node_2)
+        n_elt = max((node_1, edge, node_2, n_elt))
+    creation_ordered = sorted(nodes)
+    unit_spaced_to_creation_ordered = dict(
+        zip(range(len(nodes)), creation_ordered))
+    nfeats = [[unit_spaced_to_creation_ordered[n], 0]
+              for n in range(len(nodes))]
+    creation_ordered_to_unit_spaced = dict(
+        zip(creation_ordered, range(len(nodes))))
+    edges_1 = th.tensor([creation_ordered_to_unit_spaced[node]
+                        for node in edges_1])
+    edges_2 = th.tensor([creation_ordered_to_unit_spaced[node]
+                        for node in edges_2])
+    return (edges_1, edges_2), nfeats, efeats, n_elt
 
 
-def node_colors_of_json(graph_json, device):
-    colors = th.zeros(len(graph_json["nodes"]),
-                      graph_json["max_color"],
-                      device=device)
-    for [node, color] in graph_json["nodes"]:
-        colors[node, color] = 1
-    return colors
+def sincos_embedding_2d(n_elt, max_conn, dim, device, temperature=10000):
+    assert (dim % 4) == 0, 'feature dimension must be multiple of 4 for sincos emb'
+    h, w = n_elt, max_conn + 1
+    x, y = th.meshgrid(th.arange(h), th.arange(w), indexing="xy")
+    omega = th.arange(dim // 4) / (dim // 4 - 1)
+    omega = 1. / (temperature ** omega)
+    y = rearrange(y.flatten()[:, None] * omega[None, :],
+                  "(h w) qc -> h w qc", h=h, w=w, qc=(dim // 4))
+    x = rearrange(x.flatten()[:, None] * omega[None, :],
+                  "(h w) qc -> h w qc", h=h, w=w, qc=(dim // 4))
+    return th.cat(
+        (x.sin(), x.cos(), y.sin(), y.cos()), dim=2).to(device=device, dtype=th.float)
 
 
-def dgl_graph_and_feats_of_json(graph_json, device):
+def graph_of_json(graph_json, emb_matrix, device):
     """
     Assumes that json represents graph with no isolated nodes
     and containing at least one edge.
     """
-    graph = dgl.graph(node_tensor_tuple_of_json(graph_json), device=device)
-    colors = node_colors_of_json(graph_json, device)
-    return graph, colors
-
-
-def dgl_heterograph_of_json(graph_json, device):
-    graph, colors = dgl_graph_and_feats_of_json(graph_json, device)
-    graph.ndata["color"] = colors
-    return graph
-
-
-def dgl_homograph_of_json(graph_json, device):
-    graph, colors = dgl_graph_and_feats_of_json(graph_json, device)
-    return dgl.add_self_loop(dgl.to_homogeneous(graph)), colors
+    data, nfeats, efeats, n_elt = graph_data_of_json(graph_json)
+    if emb_matrix is None or n_elt <= emb_matrix.size(0):
+        emb_matrix = sincos_embedding_2d(n_elt, emb_matrix.size(
+            1) - 1, emb_matrix.size(2), device=emb_matrix.device)
+    graph = dgl.graph(data, device=device)
+    graph.ndata["emb"] = emb_matrix[nfeats]
+    graph.edata["emb"] = emb_matrix[efeats]
+    return emb_matrix, graph
 
 
 def pygraphviz_graph_of_json(graph_json, caption):
     graph = pgv.AGraph(directed=True, labelloc="t", label=caption)
-    for [node_id, color] in graph_json["nodes"]:
-        graph.add_node(node_id, color=COLORS[color])
-    forward_edges = set()
-    for [[node_1, _color], node_2] in graph_json["forward_edges"]:
-        forward_edges.add((node_1, node_2))
-    backward_edges = set()
-    for [[node_1, _color], node_2] in graph_json["backward_edges"]:
-        backward_edges.add((node_1, node_2))
-    for (a, b) in forward_edges:
-        if (b, a) in backward_edges:
-            graph.add_edge((a, b), arrowhead="vee")
-        else:
-            raise Exception("corrupted task json")
+    nodes, edges, n_elt = set(), set(), -1
+    for [[node_1, _port], [edge, node_2]] in graph_json["edges"]:
+        edges.add((node_1, node_2))
+        nodes.add(node_1)
+        nodes.add(node_2)
+        n_elt = max([node_1, edge, node_2])
+    for node in nodes:
+        graph.add_node(
+            node, color=f"0.722 {node / n_elt:1.3f} 0.810")
+    for (a, b) in edges:
+        graph.add_edge((a, b), arrowhead="vee")
     graph.layout()
     return graph
 
@@ -84,16 +89,16 @@ def pygraphviz_graph_of_json(graph_json, caption):
 class GraphQuantizer(nn.Module):
 
     def __init__(self,
-                 E,
-                 C,
+                 output_dim,
+                 graph_dim,
                  dsl_name,
-                 heads=2,
-                 depth=1,
+                 depth=3,
                  idleness_limit=8,
-                 max_color=10):
+                 max_conn=10):
         super().__init__()
-        self.max_color = max_color
+        self.max_conn = max_conn
         self.name_of_domain = "graph"
+        self.previous_abstractions = 0
         self.representations_save_path = os.path.join(self.name_of_domain,
                                                       REPRESENTATIONS_DIR)
         self.dsl_save_path = os.path.join(self.name_of_domain, DSL_DIR)
@@ -109,67 +114,39 @@ class GraphQuantizer(nn.Module):
         self.restart_manager = RestartManager(
             idleness_limit, len(self.representations))
         self.masses, self.programs = self._fetch_meta()
-        self.attn_up = dgl.nn.GATv2Conv(in_feats=self.max_color,  # type: ignore
-                                        out_feats=C,
-                                        num_heads=1,
-                                        attn_drop=0.5)
-        self.attns = nn.ModuleList([
-            dgl.nn.GATv2Conv(in_feats=C,  # type: ignore
-                             out_feats=C,
-                             num_heads=heads,
-                             attn_drop=0.5) for _ in range(depth)
+        self.graph = graph_dim
+        self.emb_matrix = None
+        self.convs = nn.ModuleList([
+            dgl.nn.GINEConv(  # type: ignore
+                nn.Linear(graph_dim, graph_dim)) for _ in range(depth)
         ])
-        self.ffs = nn.ModuleList([
-            nn.Sequential(*[
-                nn.LayerNorm(C),
-                nn.Linear(C, 2 * C),
-                nn.GELU(),
-                nn.Linear(2 * C, C),
-                Rearrange("n h c -> n (h c)", h=heads, c=C),
-                nn.Linear(heads * C, C)
-            ]) for _ in range(depth)
-        ])
-        self.attn_seq = dgl.nn.GATv2Conv(in_feats=C,  # type: ignore
-                                         out_feats=C,
-                                         num_heads=E,
-                                         attn_drop=0.5)
-        self.ff_seq = nn.Sequential(*[
-            nn.LayerNorm(C),
-            nn.Linear(C, 2 * C),
-            nn.GELU(),
-            nn.Linear(2 * C, C),
-            Rearrange("n e c -> n (e c)", e=E, c=C)
-        ])
-        self.pool = dgl.nn.GlobalAttentionPooling(  # type: ignore
-            nn.Linear(E * C, 1))
-        self.to_out = nn.Sequential(*[nn.Unflatten(1, (E, C)), nn.Tanh()])
+        self.pool = dgl.nn.AvgPooling()  # type:ignore
+        self.to_out = nn.Sequential(
+            *[nn.Linear(graph_dim, output_dim), nn.Tanh()])
 
     def __len__(self):
         return len(self.representations)
 
     def forward(self, _v, selections):
-        graphs, feats, restarts, filenames = self._fetch(
+        graphs, restarts, filenames = self._fetch(
             selections.flatten().tolist(), selections.device)
-        feats = rearrange(self.attn_up(graphs, feats), "n ... -> n (...)")
-        for attn, ff in zip(self.attns, self.ffs):
-            feats = ff(attn(graphs, feats))
-        return self.to_out(
-            self.pool(graphs,
-                      self.ff_seq(self.attn_seq(graphs,
-                                                feats)))), restarts, filenames
+        nfeats = graphs.ndata["emb"]
+        for conv in self.convs:
+            nfeats = conv(graphs, nfeats, graphs.edata["emb"])
+        return self.to_out(self.pool(graphs, nfeats)), restarts, filenames
 
     def _fetch(self, selections: List[int], device):
         restarts = self.restart_manager.find_restarts(selections)
-        graphs, feats, filenames = [], [], []
+        graphs, filenames = [], []
         for selection in selections:
             filename = self.representations[selection]
             with open(os.path.join(self.representations_save_path, filename)) as f:
                 repr = json.load(f)
-            graph, feat = dgl_homograph_of_json(repr["output"], device)
+            self.emb_matrix, graph = graph_of_json(
+                repr["output"], self.emb_matrix, device)
             graphs.append(graph)
-            feats.append(feat)
             filenames.append(filename)
-        return dgl.batch(graphs), th.cat(feats, dim=0), restarts, filenames
+        return dgl.batch(graphs), restarts, filenames
 
     def explore(self,
                 frontier,
@@ -193,7 +170,7 @@ class GraphQuantizer(nn.Module):
                          exploration_timeout,
                          eval_timeout=eval_timeout,
                          eval_attempts=eval_attempts,
-                         max_color=self.max_color)
+                         max_conn=self.max_conn)
         self._load_representations(dict(result["replacements"]))
         del result["replacements"]
         result.update(
@@ -238,8 +215,7 @@ class GraphQuantizer(nn.Module):
                                      primitive_size_penalty=primitive_size_penalty,
                                      dsl_size_penalty=dsl_size_penalty,
                                      invention_name_prefix=invention_name_prefix,
-                                     verbosity=verbosity,
-                                     max_color=self.max_color)
+                                     verbosity=verbosity)
         result.update(
             iterations=iterations,
             beam_size=beam_size,
@@ -249,7 +225,8 @@ class GraphQuantizer(nn.Module):
             primitives_size_penalty=primitive_size_penalty,
             dsl_size_penalty=dsl_size_penalty,
             invention_name_prefix=invention_name_prefix)
-        if result["success"]:
+        if result["n_added"] > 0:
+            self.previous_abstractions += result["n_added"]
             result.update(
                 prev_dsl_name=self.dsl_name,
                 next_dsl_name=next_dsl_name)
@@ -276,6 +253,7 @@ class GraphQuantizer(nn.Module):
                 frontier_programs.append(contents["stitch_program"])
         res = stitch_compress(
             frontier_programs,
+            self.previous_abstractions,
             iterations=iterations,
             n_beta_inversions=n_beta_inversions,
             threads=threads,
@@ -288,16 +266,22 @@ class GraphQuantizer(nn.Module):
         result.update(**stitch_kwargs)
         invented_primitives = [[name, body] for name, body in sorted(
             ((a.name, a.body) for a in res.abstractions), key=lambda a: int(a[0].split("_")[-1]))]
-        if invented_primitives:
-            result.update(success=True)
+        result.update(n_added=len(invented_primitives))
+        if result["n_added"] > 0:
+            self.previous_abstractions += result["n_added"]
             replacements = [[prev, cur] for prev, cur in zip(
                 res.json["original"], res.json["rewritten"]) if prev != cur]
             non_frontier = list(set(self.representations) - set(frontier))
             if non_frontier:
-                non_frontier_rewritten = stitch_rewrite(
-                    non_frontier, res.abstractions)
+                non_frontier_programs = []
+                for filename in non_frontier:
+                    with open(os.path.join(self.representations_save_path, filename)) as f:
+                        contents = json.load(f)
+                        non_frontier_programs.append(
+                            contents["stitch_program"])
                 replacements.extend(([prev, cur] for prev, cur in zip(
-                    non_frontier, non_frontier_rewritten)))
+                    non_frontier_programs, stitch_rewrite(
+                        non_frontier_programs, res.abstractions))))
             resp = incorporate_stitch(
                 replacements, invented_primitives, self.name_of_domain,
                 os.path.join(self.dsl_save_path, f"{self.dsl_name}.json"),
@@ -311,8 +295,6 @@ class GraphQuantizer(nn.Module):
                 next_dsl_name=next_dsl_name)
             self.dsl_name = next_dsl_name
             self.dsl_mass = resp["next_dsl_mass"]
-        else:
-            result.update(success=False)
         return result
 
     def _form_dsl_name(self, name):
@@ -357,18 +339,20 @@ class GraphQuantizer(nn.Module):
     def visualize(self, to_visualize=None):
         if to_visualize is None:
             to_visualize = os.listdir(self.representations_save_path)
-        named_graphs = {}
+        else:
+            to_visualize = list(set(to_visualize))
+        visualized = 0
         for filename in to_visualize:
             if filename.endswith(".json"):
                 with open(os.path.join(self.representations_save_path,
                                        filename)) as f:
                     contents = json.load(f)
-                print(f"loading.. {filename}")
-                named_graphs[filename[:-5]
-                             ] = pygraphviz_graph_of_json(contents["output"], filename[:-5])
-        for name, graph in named_graphs.items():
-            graph.draw(
-                os.path.join(self.visualization_save_path, name + ".svg"))
+                name = filename[:-5]
+                graph = pygraphviz_graph_of_json(contents["output"], name)
+                graph.draw(
+                    os.path.join(self.visualization_save_path, name + ".svg"))
+                visualized += 1
+        print(f"produced {visualized} visualizations.")
 
 
 class BottleneckQuantizer(nn.Module):
