@@ -3,7 +3,7 @@ from typing import List
 
 class RestartManager:
 
-    def __init__(self, idleness_limit, K):
+    def __init__(self, K, idleness_limit=10):
         self.idleness_limit, self.K = idleness_limit, K
         self.utilization = {code: 0 for code in range(K)}
 
@@ -25,5 +25,5 @@ class RestartManager:
         ranked = sorted(
             self.utilization.items(), key=(lambda x: x[1]), reverse=True)
         return [
-            code for code, since_used in ranked
+            code for (code, since_used) in ranked
             if since_used > self.idleness_limit][:len(selections)]

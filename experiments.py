@@ -1,20 +1,482 @@
+from typing import Optional
 import os
 import pickle
+import math
+from collections import defaultdict
 from copy import deepcopy
 from functools import lru_cache
 
-import torch as th
+from tqdm import tqdm, trange
 import numpy as np
-from tqdm import trange
-
+import torch as th
+from torch import nn
+from torch.utils.data import DataLoader
 
 from raven import RavenDataset
 from raven_gen import Matrix, MatrixType, Ruleset, RuleType, ComponentType, LayoutType
-from networks import (PixelShuffle_ViT_Encoder, PixelShuffle_ViT_Decoder,
-                      PixelShuffle_ViT_Classifier, StrideConv_ViT_Encoder,
-                      StrideConv_ViT_Decoder, StrideConv_ViT_Classifier)
-from quantizers import GraphQuantizer, BottleneckQuantizer, NullQuantizer
-from psn import PSN
+from networks import PixelShuffle_ViT_Encoder, PixelShuffle_ViT_Classifier
+from quantizer import Quantizer
+from graph_quantizer import GraphQuantizer
+
+
+class TqdmExtraFormat(tqdm):
+
+    def __init__(self, *args, extras={}, **kwargs):
+        self.extras = extras
+        super().__init__(*args, **kwargs)
+
+    @property
+    def format_dict(self):
+        d = super().format_dict
+        d.update(**self.extras)
+        return d
+
+
+class AccuracyMetric:
+
+    def __init__(self, shape, device):
+        super().__init__()
+        self.correct = th.zeros(shape, device=device)
+        self.incorrect = th.zeros(shape, device=device)
+
+    def tally(self, output, target):
+        preds = th.round(th.sigmoid(output))
+        self.correct += th.count_nonzero(preds == target, dim=0)
+        self.incorrect += th.count_nonzero(preds != target, dim=0)
+
+    def measure(self):
+        return th.mean(
+            self.correct / (self.correct + self.incorrect), dim=0).tolist()
+
+
+class F1Metric:
+
+    def __init__(self, shape, device):
+        self.tp = th.zeros(shape, device=device)
+        self.fp = th.zeros(shape, device=device)
+        self.fn = th.zeros(shape, device=device)
+        self.epsilon = .001 * th.ones(shape, device=device)
+
+    def tally(self, output, target):
+        preds = th.round(th.sigmoid(output))
+        self.tp += th.count_nonzero(
+            th.logical_and(preds == target, preds == 1.), dim=0)
+        self.fp += th.count_nonzero(
+            th.logical_and(preds != target, preds == 1.), dim=0)
+        self.fn += th.count_nonzero(
+            th.logical_and(preds != target, preds == 0.), dim=0)
+
+    def measure(self):
+        return th.mean(
+            (2 * self.tp) / (2 * self.tp + self.fp + self.fn + self.epsilon), dim=0).tolist()
+
+
+class ExperimentalModel(nn.Module):
+
+    def __init__(self, pre_quantizer, post_quantizer, quantizer=None):
+        super().__init__()
+        self.pre_quantizer = pre_quantizer
+        self.quantizer: Optional[Quantizer] = quantizer
+        self.post_quantizer = post_quantizer
+        self.optimizer = th.optim.Adam(self.parameters())
+        self.scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode="min", factor=.5, patience=50,
+            verbose=True, threshold=1e-4, cooldown=15)
+        self.loss_f = nn.BCEWithLogitsLoss(reduction="mean")
+
+    def forward(self, x):
+        if self.quantizer is not None:
+            return self.post_quantizer(self.quantizer(self.pre_quantizer(x)))
+        else:
+            return self.post_quantizer(self.pre_quantizer)
+
+    def _run(self,
+             dataset,
+             batch_size,
+             n_epochs,
+             device,
+             alpha=.8,
+             perf_metric=None,
+             shuffle=True,
+             train=True,
+             use_scheduler=True):
+        if train:
+            self.train()
+        else:
+            self.eval()
+        if self.quantizer is not None:
+            self.quantizer.in_restart_manager.idleness_limit = batch_size * 3
+            self.quantizer.out_restart_manager.idleness_limit = batch_size * 3
+        dataloader = DataLoader(
+            dataset, batch_size=batch_size, shuffle=shuffle)
+        total_loss, total_mass, repr_usage = 0., 0., defaultdict(int)
+        assert ((len(dataset) % batch_size) == 0)
+        steps_per_epoch = len(dataset) // batch_size
+        total_steps = n_epochs * steps_per_epoch
+        bar_format = "{bar}{r_bar} - " \
+            "epoch: {epoch:3.0f}, " \
+            "loss: {loss:.4f}, " \
+            "tot. loss: {tot_loss:.4f}, " \
+            "div.: {div:.4f}, " \
+            "tot. div.: {tot_div:.4f}, " \
+            "mass: {mass:.4f}, " \
+            "tot. mass: {tot_mass:.4f}, " \
+            "perf.: {perf:.4f}"
+        extras = {"epoch": 0, "loss": 0., "tot_loss": 0.,
+                  "div": float("NaN"), "tot_div": float("NaN"),
+                  "mass": float("NaN"), "tot_mass": float("NaN"),
+                  "perf": float("NaN")}
+        data_iterator = iter(dataloader)
+        with TqdmExtraFormat(total=total_steps, bar_format=bar_format, extras=extras) as pbar:
+            for i in range(1, total_steps + 1):
+                try:
+                    x, target = next(data_iterator)
+                except StopIteration:
+                    data_iterator = iter(dataloader)
+                    x, target = next(data_iterator)
+                x, target = x.to(device), target.to(device)
+                out = self(x, target)
+                loss = self.loss_f(out, target)
+                if self.quantizer is not None:
+                    loss += self.quantizer.loss
+                if train:
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    self.optimizer.step()
+                    if self.quantizer is not None:
+                        self.quantizer.apply_restarts()
+                    if use_scheduler:
+                        self.scheduler.step(loss)
+                pbar.extras["epoch"] = (i // steps_per_epoch)
+                if perf_metric is not None:
+                    perf_metric.tally(out, target)
+                    pbar.extras["perf"] = perf_metric.measure()
+                loss = loss.item()
+                pbar.extras["loss"] = alpha * \
+                    loss + (1 - alpha) * pbar.extras["loss"]
+                total_loss += loss
+                pbar.extras["tot_loss"] = total_loss / i
+                if self.quantizer is not None and self.quantizer.filenames is not None:
+                    pbar.extras["div"] = alpha * \
+                        (len(set(self.quantizer.filenames)) / len(self.quantizer.filenames)) + \
+                        (1 - alpha) * \
+                        (0. if math.isnan(pbar.extras["div"])
+                            else pbar.extras["div"])
+                    for filename in self.quantizer.filenames:
+                        repr_usage[filename] += 1
+                    pbar.extras["tot_div"] = len(
+                        repr_usage) / len(self.quantizer)
+                    mass = self.quantizer.mass_of_representations(
+                        self.quantizer.filenames)
+                    pbar.extras["mass"] = mass
+                    total_mass += mass
+                    pbar.extras["tot_mass"] = total_mass / i
+                pbar.update()
+        if train and self.quantizer is not None:
+            self.quantizer.repr_usage = repr_usage
+        return {
+            "perf": perf_metric.measure() if perf_metric is not None else None,
+            "total_loss": pbar.extras["tot_loss"],
+            "total_diversity": pbar.extras["tot_div"],
+            "total_mass": pbar.extras["tot_mass"],
+            "representations_usages": repr_usage
+        }
+
+    def _run_split(self,
+                   train,
+                   eval,
+                   batch_size,
+                   iterations,
+                   epochs_per_iteration,
+                   device,
+                   perf_metric,
+                   use_scheduler=True):
+        assert (perf_metric in ("acc", "f1"))
+        for i in range(1, iterations + 1):
+
+            label_shape = train[0][1].shape
+
+            def make_perf_metric():
+                if perf_metric == "acc":
+                    return AccuracyMetric(label_shape, device=device)
+                else:  # perf_metric == "f1"
+                    return F1Metric(label_shape, device=device)
+
+            training_metrics = self._run(
+                train,
+                batch_size,
+                epochs_per_iteration,
+                device,
+                perf_metric=make_perf_metric(),
+                use_scheduler=use_scheduler)
+
+            train_metrics = self._run(
+                train,
+                batch_size,
+                1,
+                device,
+                perf_metric=make_perf_metric(),
+                shuffle=False,
+                train=False)
+
+            eval_metrics = self._run(
+                eval,
+                batch_size,
+                1,
+                device,
+                perf_metric=make_perf_metric(),
+                shuffle=False,
+                train=False)
+
+            yield (
+                i,
+                {
+                    "perf_metric": perf_metric,
+                    "batch_size": batch_size,
+                    "training_set_size": len(train),
+                    "evaluation_set_size": len(eval),
+                    "epochs_per_iteration": epochs_per_iteration,
+                    "training": training_metrics,
+                    "train": train_metrics,
+                    "eval": eval_metrics
+                }
+            )
+
+    def train_split(self,
+                    train,
+                    eval,
+                    batch_size,
+                    iterations,
+                    epochs_per_iteration,
+                    device,
+                    perf_metric,
+                    *,
+                    exploration_timeout,
+                    frontier_size,
+                    frontier_of_training=True,
+                    root_dsl_name="dsl",
+                    use_scheduler=True,
+                    exploration_eval_timeout=.1,
+                    exploration_eval_attempts=1,
+                    compression_iterations=3,
+                    compression_beta_inversions=2,
+                    compression_threads=4,
+                    compression_verbose=True):
+        if self.quantizer is None:
+            curve = []
+            for i, log in self._run_split(
+                    train,
+                    eval,
+                    batch_size,
+                    iterations,
+                    epochs_per_iteration,
+                    device,
+                    perf_metric):
+                train_loss, train_perf = log["train"]["total_loss"], log["train"]["perf"]
+                eval_loss, eval_perf = log["eval"]["total_loss"], log["eval"]["perf"]
+                print(
+                    f"cycle: {i}/{iterations}, "
+                    f"train loss: {train_loss:.4E}, "
+                    f"eval loss: {eval_loss:.4E}, "
+                    f"train perf.: {train_perf:.4f}, "
+                    f"eval perf.: {eval_perf:.4f}")
+                log["iteration"] = i
+                curve.append(log)
+
+            return curve
+        else:
+
+            log = {"frontier_of_training": True, "metrics": []}
+            exploration_kwargs = {
+                "eval_timeout": exploration_eval_timeout,
+                "eval_attempts": exploration_eval_attempts
+            }
+            compression_kwargs = {
+                "iterations": compression_iterations,
+                "n_beta_inversions": compression_beta_inversions,
+                "threads": compression_threads,
+                "verbose": compression_verbose
+            }
+            if not self.quantizer.representations:
+                print(f"initial exploration...")
+                exploration_log = self.quantizer.explore(
+                    [], exploration_timeout, next_dsl_name=root_dsl_name,
+                    **exploration_kwargs)
+                print(
+                    f"\tnew: {exploration_log['new']}\n"
+                    f"\treplaced: {exploration_log['replaced']}\n"
+                    f"\ttotal: {exploration_log['total']}\n"
+                    f"\tmin. mass: {exploration_log['min_mass']}\n"
+                    f"\tmax. mass: {exploration_log['max_mass']}\n"
+                    f"\tavg. mass: {exploration_log['avg_mass']}\n"
+                )
+                exploration_log["iteration"] = 0
+                exploration_log["activity"] = "exploration"
+                log["metrics"].append(exploration_log)
+                self.quantizer.clear_visualizations()
+                self.quantizer.visualize()
+            for i, psn_log in self._run_split(
+                    train,
+                    eval,
+                    batch_size,
+                    iterations,
+                    epochs_per_iteration,
+                    device,
+                    perf_metric,
+                    use_scheduler=use_scheduler):
+                print(f"cycle: {i}/{iterations}")
+                print(
+                    "\taggregate training state.:\n"
+                    f"\t\tloss: {psn_log['training']['total_loss']:.4f}, "
+                    f"div.: {psn_log['training']['total_diversity']:.4f}, "
+                    f"mass: {psn_log['training']['total_mass']:.4f}, "
+                    f"perf.: {psn_log['training']['perf']:.4f}"
+                )
+                print(
+                    "\taggregate training set stat.:\n"
+                    f"\t\tloss: {psn_log['train']['total_loss']:.4f}, "
+                    f"div.: {psn_log['train']['total_diversity']:.4f}, "
+                    f"mass: {psn_log['train']['total_mass']:.4f}, "
+                    f"perf.: {psn_log['train']['perf']:.4f}"
+                )
+                print(
+                    "\taggregate evaluation set stat.:\n"
+                    f"\t\tloss: {psn_log['eval']['total_loss']:.4f}, "
+                    f"div.: {psn_log['eval']['total_diversity']:.4f}, "
+                    f"mass: {psn_log['eval']['total_mass']:.4f}, "
+                    f"perf.: {psn_log['eval']['perf']:.4f}"
+                )
+                psn_log["iteration"] = i
+                psn_log["activity"] = "nn_training"
+                log["metrics"].append(psn_log)
+                print("creating frontier...")
+                if frontier_of_training:
+                    repr_usage = psn_log["training"]["representations_usages"]
+                else:
+                    repr_usage = psn_log["train"]["representations_usages"]
+                frontier, frontier_log = self.quantizer.make_frontier(
+                    repr_usage, frontier_size)
+                print(
+                    f"\tfrontier created from truncated usages: {frontier_log['truncated_usages']},\n"
+                    f"\tfrontier diversity: {frontier_log['frontier_div']:.4f},\n"
+                    f"\tfrontier mass: {frontier_log['frontier_mass']:.4f}")
+                frontier_log["iteration"] = i
+                frontier_log["activity"] = "frontier_creation"
+                log["metrics"].append(frontier_log)
+                print("compressing...")
+                compression_log = self.quantizer.compress(
+                    frontier, next_dsl_name=root_dsl_name, **compression_kwargs)
+                print(
+                    f"\nnumber of primitives added during compression: {compression_log['n_added']}")
+                if compression_log["n_added"] > 0:
+                    print(
+                        f"\tnew dsl mass: {compression_log['next_dsl_mass']}")
+                compression_log["iteration"] = i
+                compression_log["activity"] = "compression"
+                log["metrics"].append(compression_log)
+                repl = self.quantizer.replacements
+                frontier = [(repl[file] if file in repl else file)
+                            for file in frontier]
+                print("exploring...")
+                exploration_log = self.quantizer.explore(
+                    frontier, exploration_timeout, next_dsl_name=root_dsl_name,
+                    **exploration_kwargs)
+                print(
+                    f"\tnew: {exploration_log['new']}\n"
+                    f"\treplaced: {exploration_log['replaced']}\n"
+                    f"\ttotal: {exploration_log['total']}\n"
+                    f"\tmin. mass: {exploration_log['min_mass']}\n"
+                    f"\tmax. mass: {exploration_log['max_mass']}\n"
+                    f"\tavg. mass: {exploration_log['avg_mass']}\n"
+                )
+                exploration_log["iteration"] = i
+                exploration_log["activity"] = "exploration"
+                log["metrics"].append(exploration_log)
+                repl = self.quantizer.replacements
+                frontier = [(repl[file] if file in repl else file)
+                            for file in frontier]
+                self.quantizer.clear_visualizations()
+                self.quantizer.visualize(frontier)
+
+            return log
+
+
+def raven_baseline(
+        target_dim,
+        input_size=128,
+        downsampled_size=8,
+        vit_dim=512,
+        vit_depth=2,
+        vit_heads=4,
+        vit_head_dim=256,
+        vit_mlp_dim=1024,
+        input_channels=1,
+        conv_depth=3,
+        device="cuda:0"):
+    pre_quantizer = PixelShuffle_ViT_Encoder(
+        input_size,
+        downsampled_size,
+        vit_dim,
+        vit_depth,
+        vit_heads,
+        vit_head_dim,
+        vit_mlp_dim,
+        input_channels=input_channels,
+        conv_depth=conv_depth)
+    post_quantizer = PixelShuffle_ViT_Classifier(
+        input_size,
+        downsampled_size,
+        vit_dim,
+        vit_depth,
+        vit_heads,
+        vit_head_dim,
+        vit_mlp_dim,
+        target_dim=target_dim)
+    return ExperimentalModel(pre_quantizer, post_quantizer).to(device)
+
+
+def raven_psn(
+        target_dim,
+        input_size=128,
+        downsampled_size=8,
+        vit_dim=512,
+        vit_depth=2,
+        vit_heads=4,
+        vit_head_dim=256,
+        vit_mlp_dim=1024,
+        input_channels=1,
+        conv_depth=3,
+        gnn_depth=3,
+        graph_dim=512,
+        max_conn=10,
+        device="cuda:0"):
+    pre_quantizer = PixelShuffle_ViT_Encoder(
+        input_size,
+        downsampled_size,
+        vit_dim,
+        vit_depth,
+        vit_heads,
+        vit_head_dim,
+        vit_mlp_dim,
+        input_channels=input_channels,
+        conv_depth=conv_depth)
+    post_quantizer = PixelShuffle_ViT_Classifier(
+        input_size,
+        downsampled_size,
+        vit_dim,
+        vit_depth,
+        vit_heads,
+        vit_head_dim,
+        vit_mlp_dim,
+        target_dim=target_dim)
+    quantizer = GraphQuantizer(
+        "dsl_0",
+        codebook_dim=((downsampled_size**2) * vit_dim),
+        beta=.25,
+        depth=gnn_depth,
+        graph_dim=graph_dim,
+        max_conn=max_conn)
+    return ExperimentalModel(pre_quantizer, post_quantizer, quantizer).to(device)
 
 
 def current_ruleset():
@@ -69,20 +531,6 @@ def generate_data(size, dataset_dir, save_pickle=False):
             with open(os.path.join(dataset_dir, "pkl", f"rpm_{i}.pkl"),
                       "wb") as f:
                 pickle.dump(rpm, f)
-
-
-OUT_CODEBOOK_SIZE = 1024
-CODEBOOK_DIM = 512
-INITIAL_DSL = "dsl_0"
-DATASET_DIR = "graph/dataset"
-N_TRAINING = 32
-N_EVAL_BATCHES = 150
-BATCH_SIZE = 8
-
-
-def reconstruction(_):
-    def f(_instance, _sub_instance, _background_color, img): return img
-    return f
 
 
 CORRECTNESS_TARGET_DIM = 1
@@ -168,14 +616,21 @@ def all_patterns(cache):
     return q
 
 
-def random_split(annotate_1, annotate_2, n_training, include_incorrect):
-    assert (n_training % BATCH_SIZE) == 0
+def random_split(dataset_dir,
+                 annotate_1,
+                 annotate_2,
+                 n_training,
+                 *,
+                 batch_size=8,
+                 n_eval_batches=150,
+                 include_incorrect):
+    assert (n_training % batch_size) == 0
     return RavenDataset.bisplit(
-        DATASET_DIR, annotate_1, annotate_2, n_training /
-        (n_training + N_EVAL_BATCHES * BATCH_SIZE),
-        (n_training + N_EVAL_BATCHES * BATCH_SIZE) /
+        dataset_dir, annotate_1, annotate_2, n_training /
+        (n_training + n_eval_batches * batch_size),
+        (n_training + n_eval_batches * batch_size) /
         (40000 if include_incorrect else 20000),
-        BATCH_SIZE, include_incorrect=include_incorrect)
+        batch_size, include_incorrect=include_incorrect)
 
 
 def save_split(x, y, path):
@@ -183,433 +638,20 @@ def save_split(x, y, path):
         pickle.dump([x.multi_indices, y.multi_indices], f)
 
 
-def load_split(path, annotate_1, annotate_2, n_training, include_incorrect):
+def load_split(path,
+               dataset_dir,
+               annotate_1,
+               annotate_2,
+               n_training,
+               *,
+               batch_size=8,
+               n_eval_batches=150,
+               include_incorrect):
     with open(path, "rb") as f:
         all_multi_indices = pickle.load(f)
-    x, y = random_split(annotate_1, annotate_2, n_training, include_incorrect)
+    x, y = random_split(dataset_dir, annotate_1, annotate_2, n_training,
+                        batch_size=batch_size, n_eval_batches=n_eval_batches,
+                        include_incorrect=include_incorrect)
     x.multi_indices = all_multi_indices[0]
     y.multi_indices = all_multi_indices[1]
     return x, y
-
-
-pre_strideconv_vit_kwargs = {
-    "input_size": 128,
-    "input_channels": 1,
-    "upsize_channels": 128,
-    "vit_in_size": 16,
-    "vit_depth": 2,
-    "vit_heads": 4,
-    "vit_head_dim": 256,
-    "vit_mlp_dim": 1024
-}
-
-post_strideconv_vit_kwargs = deepcopy(pre_strideconv_vit_kwargs)
-post_strideconv_vit_kwargs["codebook_size"] = OUT_CODEBOOK_SIZE
-
-pre_pixelshuffle_vit_kwargs = {
-    "input_size": 128,
-    "input_channels": 1,
-    "downsampled_size": 8,
-    "conv_depth": 3,
-    "vit_depth": 2,
-    "vit_heads": 4,
-    "vit_head_dim": 256,
-    "vit_mlp_dim": 1024
-}
-
-post_pixelshuffle_vit_kwargs = deepcopy(pre_pixelshuffle_vit_kwargs)
-post_pixelshuffle_vit_kwargs["codebook_size"] = OUT_CODEBOOK_SIZE
-
-
-class AccuracyMetric:
-
-    def __init__(self, shape, device):
-        super().__init__()
-        self.correct = th.zeros(shape, device=device)
-        self.incorrect = th.zeros(shape, device=device)
-
-    def tally(self, output, target):
-        preds = th.round(th.sigmoid(output))
-        self.correct += th.count_nonzero(preds == target, dim=0)
-        self.incorrect += th.count_nonzero(preds != target, dim=0)
-
-    def measure(self):
-        return th.mean(
-            self.correct / (self.correct + self.incorrect), dim=0).tolist()
-
-
-class F1Metric:
-
-    def __init__(self, shape, device):
-        self.tp = th.zeros(shape, device=device)
-        self.fp = th.zeros(shape, device=device)
-        self.fn = th.zeros(shape, device=device)
-        self.epsilon = .001 * th.ones(shape, device=device)
-
-    def tally(self, output, target):
-        preds = th.round(th.sigmoid(output))
-        self.tp += th.count_nonzero(
-            th.logical_and(preds == target, preds == 1.), dim=0)
-        self.fp += th.count_nonzero(
-            th.logical_and(preds != target, preds == 1.), dim=0)
-        self.fn += th.count_nonzero(
-            th.logical_and(preds != target, preds == 0.), dim=0)
-
-    def measure(self):
-        return th.mean(
-            (2 * self.tp) / (2 * self.tp + self.fp + self.fn + self.epsilon), dim=0).tolist()
-
-
-def train_split(psn: PSN, train, eval, iterations, epochs_per_iteration, mode, device, perf_metric, use_scheduler=True):
-    assert (perf_metric in ("acc", "f1"))
-    for i in range(1, iterations + 1):
-
-        label_shape = train[0][1].shape
-
-        def make_perf_metric():
-            if perf_metric == "acc":
-                return AccuracyMetric(label_shape, device=device)
-            else:  # perf_metric == "f1"
-                return F1Metric(label_shape, device=device)
-
-        training_metrics = psn.run(
-            train,
-            BATCH_SIZE,
-            epochs_per_iteration,
-            mode,
-            device,
-            quantization_noise_std=0.,
-            perf_metric=make_perf_metric(),
-            use_scheduler=use_scheduler)
-
-        train_metrics = psn.run(
-            train,
-            BATCH_SIZE,
-            1,
-            mode,
-            device,
-            quantization_noise_std=0.,
-            perf_metric=make_perf_metric(),
-            shuffle=False,
-            train=False)
-
-        eval_metrics = psn.run(
-            eval,
-            BATCH_SIZE,
-            1,
-            mode,
-            device,
-            quantization_noise_std=0.,
-            perf_metric=make_perf_metric(),
-            shuffle=False,
-            train=False)
-
-        yield (
-            i,
-            {
-                "perf_metric": perf_metric,
-                "batch_size": BATCH_SIZE,
-                "training_set_size": len(train),
-                "evaluation_set_size": len(eval),
-                "epochs_per_iteration": epochs_per_iteration,
-                "training": training_metrics,
-                "train": train_metrics,
-                "eval": eval_metrics
-            }
-        )
-
-
-def train_split_without_program_synthesis(psn,
-                                          train,
-                                          eval,
-                                          iterations,
-                                          epochs_per_iteration,
-                                          mode,
-                                          device,
-                                          perf_metric):
-    curve = []
-    for i, log in train_split(psn,
-                              train,
-                              eval,
-                              iterations,
-                              epochs_per_iteration,
-                              mode,
-                              device,
-                              perf_metric):
-        train_loss, train_perf = log["train"]["total_loss"], log["train"]["perf"]
-        eval_loss, eval_perf = log["eval"]["total_loss"], log["eval"]["perf"]
-        print(
-            f"cycle: {i}/{iterations}, "
-            f"train loss: {train_loss:.4E}, "
-            f"eval loss: {eval_loss:.4E}, "
-            f"train perf.: {train_perf:.4f}, "
-            f"eval perf.: {eval_perf:.4f}")
-        log["iteration"] = i
-        curve.append(log)
-
-    return curve
-
-
-def train_split_with_program_synthesis(psn,
-                                       train,
-                                       eval,
-                                       exploration_timeout,
-                                       frontier_size,
-                                       iterations,
-                                       epochs_per_iteration,
-                                       mode,
-                                       device,
-                                       perf_metric,
-                                       frontier_of_training=True,
-                                       root_dsl_name="dsl",
-                                       use_scheduler=True,
-                                       exploration_eval_timeout=.1,
-                                       exploration_eval_attempts=1,
-                                       compression_iterations=3,
-                                       compression_beta_inversions=2,
-                                       compression_threads=4,
-                                       compression_verbose=True):
-    log = {"frontier_of_training": True, "metrics": []}
-    exploration_kwargs = {
-        "eval_timeout": exploration_eval_timeout,
-        "eval_attempts": exploration_eval_attempts
-    }
-    compression_kwargs = {
-        "iterations": compression_iterations,
-        "n_beta_inversions": compression_beta_inversions,
-        "threads": compression_threads,
-        "verbose": compression_verbose
-    }
-    if not psn.quantizer.representations:
-        print(f"initial exploration...")
-        exploration_log = psn.exploration(
-            [], exploration_timeout, next_dsl_name=root_dsl_name,
-            **exploration_kwargs)
-        print(
-            f"\tnew: {exploration_log['new']}\n"
-            f"\treplaced: {exploration_log['replaced']}\n"
-            f"\ttotal: {exploration_log['total']}\n"
-            f"\tmin. mass: {exploration_log['min_mass']}\n"
-            f"\tmax. mass: {exploration_log['max_mass']}\n"
-            f"\tavg. mass: {exploration_log['avg_mass']}\n"
-        )
-        exploration_log["iteration"] = 0
-        exploration_log["activity"] = "exploration"
-        log["metrics"].append(exploration_log)
-        psn.quantizer.clear_visualizations()
-        psn.quantizer.visualize()
-    for i, psn_log in train_split(
-            psn,
-            train,
-            eval,
-            iterations,
-            epochs_per_iteration,
-            mode,
-            device,
-            perf_metric,
-            use_scheduler=use_scheduler):
-        print(f"cycle: {i}/{iterations}")
-        print(
-            "\taggregate training state.:\n"
-            f"\t\tloss: {psn_log['training']['total_loss']:.4f}, "
-            f"div.: {psn_log['training']['total_diversity']:.4f}, "
-            f"mass: {psn_log['training']['total_mass']:.4f}, "
-            f"perf.: {psn_log['training']['perf']:.4f}"
-        )
-        print(
-            "\taggregate training set stat.:\n"
-            f"\t\tloss: {psn_log['train']['total_loss']:.4f}, "
-            f"div.: {psn_log['train']['total_diversity']:.4f}, "
-            f"mass: {psn_log['train']['total_mass']:.4f}, "
-            f"perf.: {psn_log['train']['perf']:.4f}"
-        )
-        print(
-            "\taggregate evaluation set stat.:\n"
-            f"\t\tloss: {psn_log['eval']['total_loss']:.4f}, "
-            f"div.: {psn_log['eval']['total_diversity']:.4f}, "
-            f"mass: {psn_log['eval']['total_mass']:.4f}, "
-            f"perf.: {psn_log['eval']['perf']:.4f}"
-        )
-        psn_log["iteration"] = i
-        psn_log["activity"] = "nn_training"
-        log["metrics"].append(psn_log)
-        print("creating frontier...")
-        if frontier_of_training:
-            repr_usage = psn_log["training"]["representations_usages"]
-        else:
-            repr_usage = psn_log["train"]["representations_usages"]
-        frontier, frontier_log = psn.make_frontier(
-            repr_usage, frontier_size)
-        print(
-            f"\tfrontier created from truncated usages: {frontier_log['truncated_usages']},\n"
-            f"\tfrontier diversity: {frontier_log['frontier_div']:.4f},\n"
-            f"\tfrontier mass: {frontier_log['frontier_mass']:.4f}")
-        frontier_log["iteration"] = i
-        frontier_log["activity"] = "frontier_creation"
-        log["metrics"].append(frontier_log)
-        print("compressing...")
-        compression_log = psn.compression(
-            frontier, next_dsl_name=root_dsl_name, **compression_kwargs)
-        print(
-            f"\nnumber of primitives added during compression: {compression_log['n_added']}")
-        if compression_log["n_added"] > 0:
-            print(f"\tnew dsl mass: {compression_log['next_dsl_mass']}")
-        compression_log["iteration"] = i
-        compression_log["activity"] = "compression"
-        log["metrics"].append(compression_log)
-        repl = psn.quantizer.replacements
-        frontier = [(repl[file] if file in repl else file)
-                    for file in frontier]
-        print("exploring...")
-        exploration_log = psn.exploration(
-            frontier, exploration_timeout, next_dsl_name=root_dsl_name,
-            **exploration_kwargs)
-        print(
-            f"\tnew: {exploration_log['new']}\n"
-            f"\treplaced: {exploration_log['replaced']}\n"
-            f"\ttotal: {exploration_log['total']}\n"
-            f"\tmin. mass: {exploration_log['min_mass']}\n"
-            f"\tmax. mass: {exploration_log['max_mass']}\n"
-            f"\tavg. mass: {exploration_log['avg_mass']}\n"
-        )
-        exploration_log["iteration"] = i
-        exploration_log["activity"] = "exploration"
-        log["metrics"].append(exploration_log)
-        repl = psn.quantizer.replacements
-        frontier = [(repl[file] if file in repl else file)
-                    for file in frontier]
-        psn.quantizer.clear_visualizations()
-        psn.quantizer.visualize(frontier)
-
-    return log
-
-
-def raven_autoencoder_strideconv(device="cuda:0"):
-    psn = PSN(OUT_CODEBOOK_SIZE,
-              CODEBOOK_DIM,
-              INITIAL_DSL,
-              StrideConv_ViT_Encoder,
-              NullQuantizer,
-              StrideConv_ViT_Decoder,
-              two_stage_quantization=False,
-              pre_quantizer_kwargs=pre_strideconv_vit_kwargs,
-              post_quantizer_kwargs=post_strideconv_vit_kwargs)
-    return psn.to(device)
-
-
-def raven_classifier_strideconv(target_dim, device="cuda:0"):
-    post_quantizer_kwargs = deepcopy(post_strideconv_vit_kwargs)
-    post_quantizer_kwargs.update(target_dim=target_dim)
-    psn = PSN(OUT_CODEBOOK_SIZE,
-              CODEBOOK_DIM,
-              INITIAL_DSL,
-              StrideConv_ViT_Encoder,
-              NullQuantizer,
-              StrideConv_ViT_Classifier,
-              two_stage_quantization=False,
-              pre_quantizer_kwargs=pre_strideconv_vit_kwargs,
-              post_quantizer_kwargs=post_quantizer_kwargs)
-    return psn.to(device)
-
-
-def raven_autoencoder_pixelshuffle(device="cuda:0"):
-    psn = PSN(OUT_CODEBOOK_SIZE,
-              CODEBOOK_DIM,
-              INITIAL_DSL,
-              PixelShuffle_ViT_Encoder,
-              NullQuantizer,
-              PixelShuffle_ViT_Decoder,
-              two_stage_quantization=False,
-              pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
-              post_quantizer_kwargs=post_pixelshuffle_vit_kwargs)
-    return psn.to(device)
-
-
-def raven_classifier_pixelshuffle(target_dim, device="cuda:0"):
-    post_quantizer_kwargs = deepcopy(post_pixelshuffle_vit_kwargs)
-    post_quantizer_kwargs.update(target_dim=target_dim)
-    psn = PSN(OUT_CODEBOOK_SIZE,
-              CODEBOOK_DIM,
-              INITIAL_DSL,
-              PixelShuffle_ViT_Encoder,
-              NullQuantizer,
-              PixelShuffle_ViT_Classifier,
-              two_stage_quantization=False,
-              pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
-              post_quantizer_kwargs=post_quantizer_kwargs)
-    return psn.to(device)
-
-
-def raven_vqvae_pixelshuffle(device="cuda:0"):
-    psn = PSN(OUT_CODEBOOK_SIZE,
-              CODEBOOK_DIM,
-              INITIAL_DSL,
-              PixelShuffle_ViT_Encoder,
-              NullQuantizer,
-              PixelShuffle_ViT_Decoder,
-              two_stage_quantization=False,
-              pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
-              post_quantizer_kwargs=post_pixelshuffle_vit_kwargs)
-    return psn.to(device)
-
-
-def raven_vq_classifier_pixelshuffle(target_dim, device="cuda:0"):
-    post_quantizer_kwargs = deepcopy(post_pixelshuffle_vit_kwargs)
-    post_quantizer_kwargs.update(target_dim=target_dim)
-    psn = PSN(OUT_CODEBOOK_SIZE,
-              CODEBOOK_DIM,
-              INITIAL_DSL,
-              PixelShuffle_ViT_Encoder,
-              NullQuantizer,
-              PixelShuffle_ViT_Classifier,
-              two_stage_quantization=False,
-              pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
-              post_quantizer_kwargs=post_quantizer_kwargs)
-    return psn.to(device)
-
-
-def raven_psn_autoencoder_pixelshuffle(max_conn, device="cuda:0"):
-    psn = PSN(OUT_CODEBOOK_SIZE,
-              CODEBOOK_DIM,
-              INITIAL_DSL,
-              PixelShuffle_ViT_Encoder,
-              GraphQuantizer,
-              PixelShuffle_ViT_Decoder,
-              two_stage_quantization=True,
-              pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
-              quantizer_kwargs={"max_conn": max_conn},
-              post_quantizer_kwargs=post_pixelshuffle_vit_kwargs)
-    return psn.to(device)
-
-
-def raven_bottleneck_classifier_pixelshuffle(coordinates_only, n_representations, target_dim, device="cuda:0"):
-    post_quantizer_kwargs = deepcopy(post_pixelshuffle_vit_kwargs)
-    post_quantizer_kwargs.update(target_dim=target_dim)
-    psn = PSN(OUT_CODEBOOK_SIZE,
-              CODEBOOK_DIM,
-              INITIAL_DSL,
-              PixelShuffle_ViT_Encoder,
-              BottleneckQuantizer,
-              PixelShuffle_ViT_Classifier,
-              two_stage_quantization=True,
-              pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
-              quantizer_kwargs={"coordinates_only": coordinates_only,
-                                "n_representations": n_representations},
-              post_quantizer_kwargs=post_quantizer_kwargs)
-    return psn.to(device)
-
-
-def raven_psn_classifier_pixelshuffle(target_dim, max_conn, device="cuda:0"):
-    post_quantizer_kwargs = deepcopy(post_pixelshuffle_vit_kwargs)
-    post_quantizer_kwargs.update(target_dim=target_dim)
-    psn = PSN(OUT_CODEBOOK_SIZE,
-              CODEBOOK_DIM,
-              INITIAL_DSL,
-              PixelShuffle_ViT_Encoder,
-              GraphQuantizer,
-              PixelShuffle_ViT_Classifier,
-              two_stage_quantization=True,
-              pre_quantizer_kwargs=pre_pixelshuffle_vit_kwargs,
-              quantizer_kwargs={"max_conn": max_conn},
-              post_quantizer_kwargs=post_quantizer_kwargs)
-    return psn.to(device)
