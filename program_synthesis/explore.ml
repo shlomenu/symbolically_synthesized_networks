@@ -21,14 +21,14 @@ let () =
     let weighted_dsl =
       Dsl.t_of_yojson @@ S.from_file @@ SU.to_string @@ SU.member "dsl_file" j
     in
-    if List.is_empty frontier then weighted_dsl
+    let uniform () =
+      Dsl.of_primitives weighted_dsl.state_type
+      @@ Dsl.to_primitives weighted_dsl
+    in
+    if List.is_empty frontier then uniform ()
     else
-      let uniform_dsl =
-        Dsl.of_primitives weighted_dsl.state_type
-        @@ Dsl.to_primitives weighted_dsl
-      in
       fst
-      @@ Factorization.inside_outside uniform_dsl
+      @@ Factorization.inside_outside (uniform ())
            (Domains.request_of_domain domain)
            frontier
   in

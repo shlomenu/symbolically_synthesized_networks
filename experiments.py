@@ -88,7 +88,7 @@ class ExperimentalModel(nn.Module):
         if self.quantizer is not None:
             return self.post_quantizer(self.quantizer(self.pre_quantizer(x)))
         else:
-            return self.post_quantizer(self.pre_quantizer)
+            return self.post_quantizer(self.pre_quantizer(x))
 
     def _run(self,
              dataset,
@@ -135,7 +135,7 @@ class ExperimentalModel(nn.Module):
                     data_iterator = iter(dataloader)
                     x, target = next(data_iterator)
                 x, target = x.to(device), target.to(device)
-                out = self(x, target)
+                out = self(x)
                 loss = self.loss_f(out, target)
                 if self.quantizer is not None:
                     loss += self.quantizer.loss
@@ -250,10 +250,9 @@ class ExperimentalModel(nn.Module):
                     epochs_per_iteration,
                     device,
                     perf_metric,
-                    *,
-                    exploration_timeout,
-                    frontier_size,
-                    frontier_of_training=True,
+                    exploration_timeout=15.,
+                    frontier_size=float("inf"),
+                    frontier_of_training=False,
                     root_dsl_name="dsl",
                     use_scheduler=True,
                     exploration_eval_timeout=.1,
@@ -285,7 +284,6 @@ class ExperimentalModel(nn.Module):
 
             return curve
         else:
-
             log = {"frontier_of_training": True, "metrics": []}
             exploration_kwargs = {
                 "eval_timeout": exploration_eval_timeout,
@@ -355,7 +353,7 @@ class ExperimentalModel(nn.Module):
                 else:
                     repr_usage = psn_log["train"]["representations_usages"]
                 frontier, frontier_log = self.quantizer.make_frontier(
-                    repr_usage, frontier_size)
+                    frontier_size, repr_usage)
                 print(
                     f"\tfrontier created from truncated usages: {frontier_log['truncated_usages']},\n"
                     f"\tfrontier diversity: {frontier_log['frontier_div']:.4f},\n"
@@ -363,6 +361,8 @@ class ExperimentalModel(nn.Module):
                 frontier_log["iteration"] = i
                 frontier_log["activity"] = "frontier_creation"
                 log["metrics"].append(frontier_log)
+                self.quantizer.clear_visualizations()
+                self.quantizer.visualize(frontier)
                 print("compressing...")
                 compression_log = self.quantizer.compress(
                     frontier, next_dsl_name=root_dsl_name, **compression_kwargs)
@@ -395,8 +395,6 @@ class ExperimentalModel(nn.Module):
                 repl = self.quantizer.replacements
                 frontier = [(repl[file] if file in repl else file)
                             for file in frontier]
-                self.quantizer.clear_visualizations()
-                self.quantizer.visualize(frontier)
 
             return log
 
@@ -475,7 +473,8 @@ def raven_psn(
         beta=.25,
         depth=gnn_depth,
         graph_dim=graph_dim,
-        max_conn=max_conn)
+        max_conn=max_conn,
+        device=device)
     return ExperimentalModel(pre_quantizer, post_quantizer, quantizer).to(device)
 
 

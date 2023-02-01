@@ -58,13 +58,28 @@ def graph_of_json(graph_json, emb_matrix, device):
     and containing at least one edge.
     """
     data, nfeats, efeats, n_elt = graph_data_of_json(graph_json)
-    if emb_matrix is None or n_elt <= emb_matrix.size(0):
-        emb_matrix = sincos_embedding_2d(n_elt, emb_matrix.size(
+    if emb_matrix is None or n_elt + 1 > emb_matrix.size(0):
+        emb_matrix = sincos_embedding_2d(n_elt + 1, emb_matrix.size(
             1) - 1, emb_matrix.size(2), device=emb_matrix.device)
-    graph = dgl.graph(data, device=device)
-    graph.ndata["emb"] = emb_matrix[nfeats]
-    graph.edata["emb"] = emb_matrix[efeats]
-    return emb_matrix, graph
+    graph = dgl.to_homogeneous(dgl.graph(data, device=device))
+    nfeats_ind = th.empty(len(nfeats), 1, emb_matrix.size(
+        2), device=emb_matrix.device, dtype=th.long)
+    for i, [creation_order_id, port] in enumerate(nfeats):
+        nfeats_ind[i, port, :] = creation_order_id
+    efeats_ind_order = th.empty(len(efeats), emb_matrix.size(1), emb_matrix.size(
+        2), device=emb_matrix.device, dtype=th.long)
+    efeats_ind_port = th.empty(len(efeats), 1, emb_matrix.size(
+        2), device=emb_matrix.device, dtype=th.long)
+    for i, [creation_order_id, port] in enumerate(efeats):
+        for p in range(emb_matrix.size(1)):
+            efeats_ind_order[i, p, :] = creation_order_id
+        efeats_ind_port[i, 0, :] = port
+    nfeats = th.gather(emb_matrix, 0, nfeats_ind).squeeze()
+    efeats = th.gather(
+        th.gather(emb_matrix, 0, efeats_ind_order), 1, efeats_ind_port).squeeze()
+    if len(efeats.shape) == 1:
+        efeats = efeats.unsqueeze(0)
+    return (emb_matrix, graph, nfeats, efeats)
 
 
 def pygraphviz_graph_of_json(graph_json, caption):
@@ -93,11 +108,14 @@ class GraphQuantizer(Quantizer):
                  *,
                  depth,
                  graph_dim,
-                 max_conn):
+                 max_conn,
+                 device):
         super().__init__("graph", dsl_name, codebook_dim, beta, max_conn=max_conn)
         self.graph_dim = graph_dim
         self.codebook_dim = codebook_dim
-        self.emb_matrix = None
+        self.max_conn = max_conn
+        self.emb_matrix = sincos_embedding_2d(
+            10, self.max_conn, self.graph_dim, device=device)
         self.convs = nn.ModuleList([
             dgl.nn.GINEConv(  # type: ignore
                 nn.Linear(self.graph_dim, self.graph_dim)) for _ in range(depth)
@@ -107,25 +125,29 @@ class GraphQuantizer(Quantizer):
             *[nn.Linear(self.graph_dim, self.codebook_dim), nn.Tanh()])
 
     def reconstruct(self, selections):
-        graphs, restarts, filenames = self._fetch(
+        graphs, nfeats, efeats, restarts, filenames = self._fetch(
             selections.flatten().tolist(), selections.device)
-        nfeats = graphs.ndata["emb"]
         for conv in self.convs:
-            nfeats = conv(graphs, nfeats, graphs.edata["emb"])
+            nfeats = conv(graphs, nfeats, efeats)
         return self.to_out(self.pool(graphs, nfeats)), restarts, filenames
 
     def _fetch(self, selections: List[int], device):
         restarts = self.in_restart_manager.find_restarts(selections)
-        graphs, filenames = [], []
+        graphs, nfeats, efeats, filenames = [], [], [], []
         for selection in selections:
             filename = self.representations[selection]
             with open(os.path.join(self.representations_path, filename)) as f:
                 repr = json.load(f)
-            self.emb_matrix, graph = graph_of_json(
+            self.emb_matrix, graph, nfeat, efeat = graph_of_json(
                 repr["output"], self.emb_matrix, device)
             graphs.append(graph)
+            nfeats.append(nfeat)
+            efeats.append(efeat)
             filenames.append(filename)
-        return dgl.batch(graphs), restarts, filenames
+
+        return (
+            dgl.batch(graphs), th.cat(nfeats, dim=0), th.cat(efeats, dim=0),
+            restarts, filenames)
 
     def visualize(self, to_visualize=None):
         if to_visualize is None:

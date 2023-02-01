@@ -93,7 +93,8 @@ class Quantizer(nn.Module):
             self.out_restarts = (x.detach(), out_restarts)
         out = x + (recon_quantized_noisy - x).detach()
         self.loss = \
-            self.closeness_loss(x, recon_quantized_det, recon_quantized_noisy) + self.closeness_loss(x, x_quantized) + \
+            self.closeness_loss(x, recon_quantized_det, recon_quantized_noisy) + \
+            self.closeness_loss(x, x_quantized) + \
             self.closeness_loss(recon, recon_quantized_det,
                                 quantized_latents_noisy=recon_quantized_noisy)
         self.filenames = filenames
@@ -361,8 +362,6 @@ class Quantizer(nn.Module):
                                 for file in self.representations]
         self.representations.extend(
             set(os.listdir(self.representations_path)) - set(self.representations))
-        for code in range(len(self)):
-            self.in_restart_manager.add_code(code)
         self.masses, self.programs = self._fetch_meta()
         self.min_mass = min(self.masses.values())
         self.max_mass = max(self.masses.values())

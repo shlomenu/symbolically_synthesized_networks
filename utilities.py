@@ -118,7 +118,7 @@ def invoke_binary_with_json(path_to_binary, msg_json):
     try:
         resp = json.loads(resp.decode("utf-8"))
     except Exception as e:
-        eprint("Could not parse json.")
+        print("Could not parse json.")
         with open("/tmp/_message", "w") as handle:
             handle.write(msg)
         with open("/tmp/_response", "w") as handle:

@@ -101,5 +101,5 @@ class PixelShuffle_ViT_Classifier(nn.Module):
         ]
         self.net = nn.Sequential(*layers)
 
-    def forward(self, latents, selections):
-        return self.net((latents, selections))
+    def forward(self, latents):
+        return self.net(latents)
