@@ -49,7 +49,8 @@ class PixelShuffle_ViT_Encoder(nn.Module):
                  vit_mlp_dim,
                  *,
                  input_channels,
-                 conv_depth):
+                 conv_depth,
+                 output_dim):
         super().__init__()
         assert (input_size >= downsampled_size and vit_depth > 0)
         layers = [
@@ -72,9 +73,9 @@ class PixelShuffle_ViT_Encoder(nn.Module):
                       c=vit_dim),
             Transformer(vit_dim, vit_depth, vit_heads, vit_head_dim,
                         vit_mlp_dim),
+            GlobalAvgPool(vit_dim, output_dim)
         ])
         self.net = nn.Sequential(*layers)
-        self.codebook_dim = (downsampled_size**2) * vit_dim
 
     def forward(self, img):
         return self.net(img)
@@ -91,14 +92,18 @@ class PixelShuffle_ViT_Classifier(nn.Module):
                  vit_head_dim,
                  vit_mlp_dim,
                  *,
-                 target_dim):
+                 target_dim,
+                 no_transformer=False):
         super().__init__()
         assert (input_size >= downsampled_size and vit_depth > 0)
-        layers = [
-            Transformer(vit_dim, vit_depth, vit_heads, vit_head_dim,
-                        vit_mlp_dim),
-            GlobalAvgPool(vit_dim, target_dim),
-        ]
+        if no_transformer:
+            layers = [GlobalAvgPool(vit_dim, target_dim)]
+        else:
+            layers = [
+                Transformer(vit_dim, vit_depth, vit_heads, vit_head_dim,
+                            vit_mlp_dim),
+                GlobalAvgPool(vit_dim, target_dim),
+            ]
         self.net = nn.Sequential(*layers)
 
     def forward(self, latents):

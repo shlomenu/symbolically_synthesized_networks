@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 from raven import RavenDataset
 from raven_gen import Matrix, MatrixType, Ruleset, RuleType, ComponentType, LayoutType
 from networks import PixelShuffle_ViT_Encoder, PixelShuffle_ViT_Classifier
-from quantizer import Quantizer
+from quantizer import Quantizer, VQBaseline
 from graph_quantizer import GraphQuantizer
 
 
@@ -271,7 +271,8 @@ class ExperimentalModel(nn.Module):
                     iterations,
                     epochs_per_iteration,
                     device,
-                    perf_metric):
+                    perf_metric,
+                    use_scheduler=use_scheduler):
                 train_loss, train_perf = log["train"]["total_loss"], log["train"]["perf"]
                 eval_loss, eval_perf = log["eval"]["total_loss"], log["eval"]["perf"]
                 print(
@@ -407,11 +408,11 @@ def raven_baseline(
         target_dim,
         input_size=128,
         downsampled_size=8,
-        vit_dim=512,
+        vit_dim=256,
         vit_depth=2,
         vit_heads=4,
-        vit_head_dim=256,
-        vit_mlp_dim=1024,
+        vit_head_dim=128,
+        vit_mlp_dim=512,
         input_channels=1,
         conv_depth=3,
         device="cuda:0"):
@@ -424,17 +425,41 @@ def raven_baseline(
         vit_head_dim,
         vit_mlp_dim,
         input_channels=input_channels,
-        conv_depth=conv_depth)
-    post_quantizer = PixelShuffle_ViT_Classifier(
+        conv_depth=conv_depth,
+        output_dim=target_dim)
+    post_quantizer = nn.Identity()
+    return ExperimentalModel(pre_quantizer, post_quantizer).to(device)
+
+
+def raven_vq_baseline(
+        target_dim,
+        codebook_size,
+        input_size=128,
+        downsampled_size=8,
+        vit_dim=256,
+        vit_depth=2,
+        vit_heads=4,
+        vit_head_dim=128,
+        vit_mlp_dim=512,
+        input_channels=1,
+        conv_depth=3,
+        codebook_dim=512,
+        beta=3.,
+        device="cuda:0"):
+    pre_quantizer = PixelShuffle_ViT_Encoder(
         input_size,
         downsampled_size,
         vit_dim,
-        1,
+        vit_depth,
         vit_heads,
         vit_head_dim,
         vit_mlp_dim,
-        target_dim=target_dim)
-    return ExperimentalModel(pre_quantizer, post_quantizer).to(device)
+        input_channels=input_channels,
+        conv_depth=conv_depth,
+        output_dim=codebook_dim)
+    post_quantizer = nn.Linear(codebook_dim, target_dim)
+    quantizer = VQBaseline(codebook_size, codebook_dim, beta)
+    return ExperimentalModel(pre_quantizer, post_quantizer, quantizer).to(device)
 
 
 def raven_psn(
@@ -451,6 +476,8 @@ def raven_psn(
         gnn_depth=3,
         graph_dim=512,
         max_conn=10,
+        beta=3.,
+        dropout_rate=.6,
         device="cuda:0"):
     pre_quantizer = PixelShuffle_ViT_Encoder(
         input_size,
@@ -461,23 +488,17 @@ def raven_psn(
         vit_head_dim,
         vit_mlp_dim,
         input_channels=input_channels,
-        conv_depth=conv_depth)
-    post_quantizer = PixelShuffle_ViT_Classifier(
-        input_size,
-        downsampled_size,
-        vit_dim,
-        1,
-        vit_heads,
-        vit_head_dim,
-        vit_mlp_dim,
-        target_dim=target_dim)
+        conv_depth=conv_depth,
+        output_dim=graph_dim)
+    post_quantizer = nn.Identity()
     quantizer = GraphQuantizer(
         "dsl_0",
-        codebook_dim=((downsampled_size**2) * vit_dim),
-        beta=.25,
+        codebook_dim=graph_dim,
+        beta=beta,
+        dropout_rate=dropout_rate,
         depth=gnn_depth,
-        graph_dim=graph_dim,
         max_conn=max_conn,
+        output_dim=target_dim,
         device=device)
     return ExperimentalModel(pre_quantizer, post_quantizer, quantizer).to(device)
 

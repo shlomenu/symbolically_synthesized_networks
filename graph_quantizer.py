@@ -106,31 +106,33 @@ class GraphQuantizer(Quantizer):
                  codebook_dim,
                  beta,
                  *,
+                 dropout_rate,
                  depth,
-                 graph_dim,
                  max_conn,
+                 output_dim,
                  device):
         super().__init__("graph", dsl_name, codebook_dim, beta, max_conn=max_conn)
-        self.graph_dim = graph_dim
         self.codebook_dim = codebook_dim
+        self.output_dim = output_dim
         self.max_conn = max_conn
         self.emb_matrix = sincos_embedding_2d(
-            10, self.max_conn, self.graph_dim, device=device)
-        self.to_feature = nn.Linear(codebook_dim, graph_dim)
+            10, self.max_conn, self.codebook_dim, device=device)
+        self.node_dropout = nn.Dropout(dropout_rate)
+        self.edge_dropout = nn.Dropout(dropout_rate)
         self.convs = nn.ModuleList([
             dgl.nn.GINEConv(  # type: ignore
-                nn.Linear(self.graph_dim, self.graph_dim)) for _ in range(depth)
+                nn.Linear(self.codebook_dim, self.codebook_dim)) for _ in range(depth)
         ])
         self.pool = dgl.nn.AvgPooling()  # type:ignore
-        self.to_out = nn.Linear(self.graph_dim, self.codebook_dim)
+        self.linear_out = nn.Linear(self.codebook_dim, output_dim)
 
     def structural_prediction(self, latent, selections):
         graphs, nfeats, efeats, restarts, filenames = self._fetch(
-            self.to_feature(latent), selections.flatten().tolist(),
-            selections.device)
+            latent, selections.flatten().tolist(), selections.device)
+        nfeats, efeats = self.node_dropout(nfeats), self.edge_dropout(efeats)
         for conv in self.convs:
             nfeats = conv(graphs, nfeats, efeats)
-        return self.to_out(self.pool(graphs, nfeats)), restarts, filenames
+        return self.linear_out(self.pool(graphs, nfeats)), restarts, filenames
 
     def _fetch(self, features, selections: List[int], device):
         restarts = self.restart_manager.find_restarts(selections)
