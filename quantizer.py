@@ -9,8 +9,35 @@ import torch as th
 from torch import nn
 import torch.nn.functional as F
 
-from restart_manager import RestartManager
 import utilities
+
+
+class RestartManager:
+
+    def __init__(self, K, idleness_limit=10):
+        self.idleness_limit, self.K = idleness_limit, K
+        self.utilization = {code: 0 for code in range(K)}
+
+    def add_code(self, code: int):
+        if code not in self.utilization:
+            self.utilization[code] = 0
+        self.K = len(self.utilization)
+
+    def reset_count(self, selections: List[int]):
+        for code in selections:
+            self.utilization[code] = 0
+
+    def find_restarts(self, selections: List[int]):
+        self.reset_count(selections)
+        refreshed = set(selections)
+        for code in range(self.K):
+            if code not in refreshed:
+                self.utilization[code] = self.utilization[code] + 1
+        ranked = sorted(
+            self.utilization.items(), key=(lambda x: x[1]), reverse=True)
+        return [
+            code for (code, since_used) in ranked
+            if since_used > self.idleness_limit][:len(selections)]
 
 
 class Quantizer(nn.Module):
@@ -36,12 +63,9 @@ class Quantizer(nn.Module):
         self.repr_usage = defaultdict(int)
         self.explore_kwargs = explore_kwargs
         self.codebook_dim = codebook_dim
-        self.in_codebook = self.initial_codebook()
-        self.out_codebook = self.initial_codebook()
-        self.in_restart_manager = RestartManager(len(self))
-        self.out_restart_manager = RestartManager(len(self))
-        self.in_restarts: Optional[Tuple[th.Tensor, List[int]]] = None
-        self.out_restarts: Optional[Tuple[th.Tensor, List[int]]] = None
+        self.codebook = self.initial_codebook()
+        self.restart_manager = RestartManager(len(self))
+        self.restarts: Optional[Tuple[th.Tensor, List[int]]] = None
         self.beta = beta
 
     def load_dsl(self, dsl_name):
@@ -69,91 +93,47 @@ class Quantizer(nn.Module):
     def __len__(self):
         return len(self.representations)
 
-    def forward(self, x, quantization_noise_std=0.):
-        in_shape = x.shape
-        x = rearrange(x, "b s c -> b (s c)")
+    def forward(self, x):
+        x, in_shape = rearrange(x, "b s c -> b (s c)"), x.shape
         assert x.size(1) == self.codebook_dim
-        (x_quantized, ), (x_encoding_inds, ) = \
-            self.nearest_neighbors(x, self.in_codebook,
-                                   quantization_noise_std, noisy=False)
-        recon, in_restarts, filenames = self.reconstruct(
-            x_encoding_inds)  # type: ignore
-        if in_restarts:
-            self.in_restarts = (x.detach(), in_restarts)
+        x_codebook, x_encoding_inds = self.nearest_neighbors(x)
+        x_quantized = x + (x_codebook - x).detach()
+        structure, restarts, filenames = self.structural_prediction(
+            x_quantized, x_encoding_inds)  # type: ignore
+        if restarts:
+            self.restarts = (x.detach(), restarts)
         else:
-            self.in_restarts = None
-        (recon_quantized_det, recon_quantized_noisy), (_, recon_encoding_inds_noisy) = \
-            self.nearest_neighbors(
-                recon, self.out_codebook, quantization_noise_std)
-        self.out_restarts, out_restarts = None, []
-        for cmds in recon_encoding_inds_noisy.tolist():
-            out_restarts: List[int] = self.out_restart_manager.find_restarts(
-                cmds)
-        if out_restarts:
-            self.out_restarts = (x.detach(), out_restarts)
-        out = x + (recon_quantized_noisy - x).detach()
-        self.loss = \
-            self.closeness_loss(x, recon_quantized_det, recon_quantized_noisy) + \
-            self.closeness_loss(x, x_quantized) + \
-            self.closeness_loss(recon, recon_quantized_det,
-                                quantized_latents_noisy=recon_quantized_noisy)
+            self.restarts = None
+        self.loss = self.beta * F.mse_loss(x, x_codebook.detach()) + \
+            F.mse_loss(x_codebook, x.detach())
         self.filenames = filenames
-        return out.reshape(in_shape)
+        return (x_quantized + structure).reshape(in_shape)
 
-    def nearest_neighbors(self, flat_latents, codebook, noise_std, noisy=True):
-        K = codebook.weight.size(0)
-
-        dist = th.sum(flat_latents ** 2, dim=1, keepdim=True) + \
-            th.sum(codebook.weight ** 2, dim=1) - \
-            2 * th.matmul(flat_latents,
-                          codebook.weight.t())  # shape: b k
-
-        encoding_inds_det = dist.argmin(
-            dim=1).unsqueeze(dim=1)
-
-        if noisy:
-            encoding_inds = [encoding_inds_det, (encoding_inds_det + th.round(
-                th.normal(mean=0,
-                          std=noise_std,
-                          size=encoding_inds_det.shape,
-                          device=encoding_inds_det.device,
-                          dtype=th.float)).long()).clamp(0, K - 1)]
-        else:
-            encoding_inds = [encoding_inds_det]
-
-        quantized_latents = []
-        for inds in encoding_inds:
-            encoding_one_hot = th.zeros(inds.size(0) * inds.size(1),
-                                        K,
-                                        device=flat_latents.device)  # shape: b k
-            encoding_one_hot.scatter_(dim=1, index=inds, value=1)
-            quantized_latents.append(
-                th.matmul(encoding_one_hot, codebook.weight))
-
+    def nearest_neighbors(self, latents):
+        K = self.codebook.weight.size(0)
+        dist = th.sum(latents ** 2, dim=1, keepdim=True) + \
+            th.sum(self.codebook.weight ** 2, dim=1) - \
+            2 * th.matmul(latents,
+                          self.codebook.weight.t())  # shape: b k
+        encoding_inds = dist.argmin(dim=1).unsqueeze(dim=1)
+        encoding_one_hot = th.zeros(
+            encoding_inds.size(0) * encoding_inds.size(1),
+            K, device=latents.device)  # shape: b k
+        encoding_one_hot.scatter_(dim=1, index=encoding_inds, value=1)
+        quantized_latents = th.matmul(
+            encoding_one_hot, self.codebook.weight)
         return quantized_latents, encoding_inds
 
-    def closeness_loss(self, latents, quantized_latents_det, quantized_latents_noisy=None):
-        adjusted_quantized_latents = quantized_latents_det if quantized_latents_noisy is None else quantized_latents_noisy
-        return self.beta * F.mse_loss(latents, quantized_latents_det.detach()) + \
-            F.mse_loss(adjusted_quantized_latents, latents.detach())
-
     def apply_restarts(self):
-        if self.in_restarts is not None:
-            starts, to_restart = self.in_restarts
+        if self.restarts is not None:
+            starts, to_restart = self.restarts
             randomized = starts[np.random.choice(starts.size(0),
                                                  min(len(to_restart), starts.size(0)), replace=False)]
-            self.in_codebook.weight.data[to_restart] = randomized
-            self.in_restart_manager.reset_count(to_restart)
-            self.in_restarts = None
-        if self.out_restarts is not None:
-            starts, to_restart = self.out_restarts
-            randomized = starts[np.random.choice(starts.size(0),
-                                                 min(len(to_restart), starts.size(0)), replace=False)]
-            self.out_codebook.weight.data[to_restart] = randomized
-            self.out_restart_manager.reset_count(to_restart)
-            self.out_restarts = None
+            self.codebook.weight.data[to_restart] = randomized
+            self.restart_manager.reset_count(to_restart)
+            self.restarts = None
 
-    def reconstruct(self, _selections):
+    def reconstruct(self, _latents, _selections):
         pass
 
     def make_frontier(self, representations_limit, repr_usage=None):
@@ -184,20 +164,24 @@ class Quantizer(nn.Module):
 
     def explore(self,
                 frontier,
-                exploration_timeout,
                 next_dsl_name="dsl",
                 *,
+                exploration_timeout,
+                program_size_limit,
                 eval_timeout,
-                eval_attempts):
+                eval_attempts,
+                max_diff):
         next_dsl_name = self._incremented_dsl_name(next_dsl_name)
         log = utilities.explore(self.name_of_domain,
                                 frontier,
                                 self.dsl_file(),
                                 self.dsl_file(dsl_name=next_dsl_name),
                                 self.representations_path,
-                                exploration_timeout,
+                                exploration_timeout=exploration_timeout,
+                                program_size_limit=program_size_limit,
                                 eval_timeout=eval_timeout,
                                 eval_attempts=eval_attempts,
+                                max_diff=max_diff,
                                 **self.explore_kwargs)
         self._load_representations(dict(log["replacements"]))
         del log["replacements"]
@@ -213,15 +197,15 @@ class Quantizer(nn.Module):
             eval_attempts=eval_attempts)
         self.dsl_name = next_dsl_name
         if log["new"] > 0:
-            in_codebook, out_codebook = self.initial_codebook(), self.initial_codebook()
-            self.in_codebook = in_codebook.to(
-                device=self.in_codebook.weight.device)
-            self.out_codebook = out_codebook.to(
-                device=self.out_codebook.weight.device)
+            codebook = self.initial_codebook()
+            if self.codebook.weight.size(0) > 0:
+                codebook.weight.data[:self.codebook.weight.size(
+                    0)] = self.codebook.weight.data
+            self.codebook = codebook.to(
+                device=self.codebook.weight.device)
             for code in range(len(self)):
-                self.in_restart_manager.add_code(code)
-                self.out_restart_manager.add_code(code)
-            self.in_restarts, self.out_restarts = None, None
+                self.restart_manager.add_code(code)
+            self.restarts = None
         return log
 
     def compress(self,

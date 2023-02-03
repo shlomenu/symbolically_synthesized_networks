@@ -11,6 +11,7 @@ let () =
   let domain = SU.to_string @@ SU.member "domain" j in
   let parse = Domains.dsl_insensitive_parser_of_domain domain in
   let representations_dir = SU.to_string @@ SU.member "representations_dir" j in
+  let max_diff = SU.to_float @@ SU.member "max_diff" j in
   let frontier =
     List.map ~f:SU.to_string @@ SU.to_list @@ SU.member "frontier" j
   in
@@ -27,16 +28,17 @@ let () =
     in
     if List.is_empty frontier then uniform ()
     else
-      fst
-      @@ Factorization.inside_outside (uniform ())
-           (Domains.request_of_domain domain)
-           frontier
+      Factorization.inside_outside (uniform ())
+        (Domains.request_of_domain domain)
+        frontier
+      |> fst |> Dsl.rescale ~max_diff
   in
   let next_dsl_file = SU.to_string @@ SU.member "next_dsl_file" j in
+  let program_size_limit = SU.to_int @@ SU.member "program_size_limit" j in
   S.to_file next_dsl_file @@ Dsl.yojson_of_t dsl ;
   let n_new, n_replaced, replacements, n_enumerated, max_ll =
-    Domains.explore domain ~exploration_timeout ~eval_timeout ~attempts ~dsl
-      ~representations_dir j
+    Domains.explore domain ~exploration_timeout ~program_size_limit
+      ~eval_timeout ~attempts ~dsl ~representations_dir j
   in
   S.to_channel Out_channel.stdout
   @@ `Assoc

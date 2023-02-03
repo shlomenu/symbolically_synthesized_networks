@@ -116,37 +116,39 @@ class GraphQuantizer(Quantizer):
         self.max_conn = max_conn
         self.emb_matrix = sincos_embedding_2d(
             10, self.max_conn, self.graph_dim, device=device)
+        self.to_feature = nn.Linear(codebook_dim, graph_dim)
         self.convs = nn.ModuleList([
             dgl.nn.GINEConv(  # type: ignore
                 nn.Linear(self.graph_dim, self.graph_dim)) for _ in range(depth)
         ])
         self.pool = dgl.nn.AvgPooling()  # type:ignore
-        self.to_out = nn.Sequential(
-            *[nn.Linear(self.graph_dim, self.codebook_dim), nn.Tanh()])
+        self.to_out = nn.Linear(self.graph_dim, self.codebook_dim)
 
-    def reconstruct(self, selections):
+    def structural_prediction(self, latent, selections):
         graphs, nfeats, efeats, restarts, filenames = self._fetch(
-            selections.flatten().tolist(), selections.device)
+            self.to_feature(latent), selections.flatten().tolist(),
+            selections.device)
         for conv in self.convs:
             nfeats = conv(graphs, nfeats, efeats)
         return self.to_out(self.pool(graphs, nfeats)), restarts, filenames
 
-    def _fetch(self, selections: List[int], device):
-        restarts = self.in_restart_manager.find_restarts(selections)
+    def _fetch(self, features, selections: List[int], device):
+        restarts = self.restart_manager.find_restarts(selections)
         graphs, nfeats, efeats, filenames = [], [], [], []
-        for selection in selections:
+        for i, selection in enumerate(selections):
             filename = self.representations[selection]
             with open(os.path.join(self.representations_path, filename)) as f:
                 repr = json.load(f)
             self.emb_matrix, graph, nfeat, efeat = graph_of_json(
                 repr["output"], self.emb_matrix, device)
             graphs.append(graph)
-            nfeats.append(nfeat)
-            efeats.append(efeat)
+            nfeats.append(nfeat + features[i])
+            efeats.append(efeat + features[i])
             filenames.append(filename)
-
         return (
-            dgl.batch(graphs), th.cat(nfeats, dim=0), th.cat(efeats, dim=0),
+            dgl.batch(graphs),
+            th.cat(nfeats, dim=0),
+            th.cat(efeats, dim=0),
             restarts, filenames)
 
     def visualize(self, to_visualize=None):

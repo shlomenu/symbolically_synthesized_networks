@@ -3,7 +3,6 @@ import os
 import pickle
 import math
 from collections import defaultdict
-from copy import deepcopy
 from functools import lru_cache
 
 from tqdm import tqdm, trange
@@ -105,8 +104,7 @@ class ExperimentalModel(nn.Module):
         else:
             self.eval()
         if self.quantizer is not None:
-            self.quantizer.in_restart_manager.idleness_limit = batch_size * 3
-            self.quantizer.out_restart_manager.idleness_limit = batch_size * 3
+            self.quantizer.restart_manager.idleness_limit = batch_size * 3
         dataloader = DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle)
         total_loss, total_mass, repr_usage = 0., 0., defaultdict(int)
@@ -251,6 +249,8 @@ class ExperimentalModel(nn.Module):
                     device,
                     perf_metric,
                     exploration_timeout=15.,
+                    max_diff=.5,
+                    program_size_limit=100,
                     frontier_size=float("inf"),
                     frontier_of_training=False,
                     root_dsl_name="dsl",
@@ -260,8 +260,9 @@ class ExperimentalModel(nn.Module):
                     compression_iterations=3,
                     compression_beta_inversions=2,
                     compression_threads=4,
-                    compression_verbose=True):
-        if self.quantizer is None:
+                    compression_verbose=True,
+                    no_program_synthesis=False):
+        if self.quantizer is None or no_program_synthesis:
             curve = []
             for i, log in self._run_split(
                     train,
@@ -286,8 +287,11 @@ class ExperimentalModel(nn.Module):
         else:
             log = {"frontier_of_training": True, "metrics": []}
             exploration_kwargs = {
+                "exploration_timeout": exploration_timeout,
+                "program_size_limit": program_size_limit,
                 "eval_timeout": exploration_eval_timeout,
-                "eval_attempts": exploration_eval_attempts
+                "eval_attempts": exploration_eval_attempts,
+                "max_diff": max_diff
             }
             compression_kwargs = {
                 "iterations": compression_iterations,
@@ -298,7 +302,7 @@ class ExperimentalModel(nn.Module):
             if not self.quantizer.representations:
                 print(f"initial exploration...")
                 exploration_log = self.quantizer.explore(
-                    [], exploration_timeout, next_dsl_name=root_dsl_name,
+                    [], next_dsl_name=root_dsl_name,
                     **exploration_kwargs)
                 print(
                     f"\tnew: {exploration_log['new']}\n"
@@ -379,7 +383,7 @@ class ExperimentalModel(nn.Module):
                             for file in frontier]
                 print("exploring...")
                 exploration_log = self.quantizer.explore(
-                    frontier, exploration_timeout, next_dsl_name=root_dsl_name,
+                    frontier, next_dsl_name=root_dsl_name,
                     **exploration_kwargs)
                 print(
                     f"\tnew: {exploration_log['new']}\n"
@@ -425,7 +429,7 @@ def raven_baseline(
         input_size,
         downsampled_size,
         vit_dim,
-        vit_depth,
+        1,
         vit_heads,
         vit_head_dim,
         vit_mlp_dim,
@@ -437,11 +441,11 @@ def raven_psn(
         target_dim,
         input_size=128,
         downsampled_size=8,
-        vit_dim=512,
+        vit_dim=256,
         vit_depth=2,
         vit_heads=4,
-        vit_head_dim=256,
-        vit_mlp_dim=1024,
+        vit_head_dim=128,
+        vit_mlp_dim=512,
         input_channels=1,
         conv_depth=3,
         gnn_depth=3,
@@ -462,7 +466,7 @@ def raven_psn(
         input_size,
         downsampled_size,
         vit_dim,
-        vit_depth,
+        1,
         vit_heads,
         vit_head_dim,
         vit_mlp_dim,

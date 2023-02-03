@@ -13,10 +13,12 @@ def explore(domain,
             dsl_file,
             next_dsl_file,
             representations_dir,
-            exploration_timeout,
             *,
+            exploration_timeout,
+            program_size_limit,
             eval_timeout,
             eval_attempts,
+            max_diff,
             **kwargs):
     json_msg = {
         "domain": domain,
@@ -25,8 +27,10 @@ def explore(domain,
         "next_dsl_file": next_dsl_file,
         "representations_dir": representations_dir,
         "exploration_timeout": exploration_timeout,
+        "program_size_limit": program_size_limit,
         "eval_timeout": eval_timeout,
-        "attempts": eval_attempts
+        "attempts": eval_attempts,
+        "max_diff": max_diff
     }
     json_msg.update(kwargs)
     return invoke_binary_with_json(EXPLORE_BINARY_LOC, json_msg)
