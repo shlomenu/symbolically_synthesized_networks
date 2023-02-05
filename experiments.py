@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, Any
 import os
 import pickle
 import math
@@ -248,10 +248,11 @@ class ExperimentalModel(nn.Module):
                     epochs_per_iteration,
                     device,
                     perf_metric,
+                    scarcity=.5,
+                    preservation_rate=.5,
                     exploration_timeout=15.,
                     max_diff=.5,
                     program_size_limit=100,
-                    frontier_size=float("inf"),
                     frontier_of_training=False,
                     root_dsl_name="dsl",
                     use_scheduler=True,
@@ -286,7 +287,10 @@ class ExperimentalModel(nn.Module):
 
             return curve
         else:
-            log = {"frontier_of_training": True, "metrics": []}
+            n_retained = int(scarcity * len(train))
+            n_preserved = int(preservation_rate * n_retained)
+            log = {"frontier_of_training": True, "scarcity": scarcity,
+                   "preservation_rate": preservation_rate, "metrics": []}
             exploration_kwargs = {
                 "exploration_timeout": exploration_timeout,
                 "program_size_limit": program_size_limit,
@@ -303,12 +307,13 @@ class ExperimentalModel(nn.Module):
             if not self.quantizer.representations:
                 print(f"initial exploration...")
                 exploration_log = self.quantizer.explore(
-                    [], next_dsl_name=root_dsl_name,
+                    n_retained, next_dsl_name=root_dsl_name,
                     **exploration_kwargs)
                 print(
                     f"\tnew: {exploration_log['new']}\n"
                     f"\treplaced: {exploration_log['replaced']}\n"
                     f"\ttotal: {exploration_log['total']}\n"
+                    f"\tmax. novel representations: {exploration_log['max_novel_representations']}\n"
                     f"\tmin. mass: {exploration_log['min_mass']}\n"
                     f"\tmax. mass: {exploration_log['max_mass']}\n"
                     f"\tavg. mass: {exploration_log['avg_mass']}\n"
@@ -352,25 +357,27 @@ class ExperimentalModel(nn.Module):
                 psn_log["iteration"] = i
                 psn_log["activity"] = "nn_training"
                 log["metrics"].append(psn_log)
-                print("creating frontier...")
+                print("culling frontier...")
                 if frontier_of_training:
                     repr_usage = psn_log["training"]["representations_usages"]
                 else:
                     repr_usage = psn_log["train"]["representations_usages"]
-                frontier, frontier_log = self.quantizer.make_frontier(
-                    frontier_size, repr_usage)
-                print(
-                    f"\tfrontier created from truncated usages: {frontier_log['truncated_usages']},\n"
-                    f"\tfrontier diversity: {frontier_log['frontier_div']:.4f},\n"
-                    f"\tfrontier mass: {frontier_log['frontier_mass']:.4f}")
-                frontier_log["iteration"] = i
-                frontier_log["activity"] = "frontier_creation"
-                log["metrics"].append(frontier_log)
+                cull_log: Dict[str, Any] = self.quantizer.cull_representations(
+                    n_preserved, repr_usage)
+                if cull_log["n_truncated"] > 0:
+                    print(
+                        f"\tnumber discarded: {cull_log['n_truncated']},\n"
+                        f"\tmin. mass: {cull_log['min_mass']},\n"
+                        f"\tmax. mass: {cull_log['max_mass']},\n"
+                        f"\tavg. mass: {cull_log['avg_mass']},\n")
+                cull_log["iteration"] = i
+                cull_log["activity"] = "cull_representations"
+                log["metrics"].append(cull_log)
                 self.quantizer.clear_visualizations()
-                self.quantizer.visualize(frontier)
+                self.quantizer.visualize(self.quantizer.representations)
                 print("compressing...")
                 compression_log = self.quantizer.compress(
-                    frontier, next_dsl_name=root_dsl_name, **compression_kwargs)
+                    next_dsl_name=root_dsl_name, **compression_kwargs)
                 print(
                     f"\nnumber of primitives added during compression: {compression_log['n_added']}")
                 if compression_log["n_added"] > 0:
@@ -379,16 +386,15 @@ class ExperimentalModel(nn.Module):
                 compression_log["iteration"] = i
                 compression_log["activity"] = "compression"
                 log["metrics"].append(compression_log)
-                repl = self.quantizer.replacements
-                frontier = [(repl[file] if file in repl else file)
-                            for file in frontier]
                 print("exploring...")
                 exploration_log = self.quantizer.explore(
-                    frontier, next_dsl_name=root_dsl_name,
+                    n_retained,
+                    next_dsl_name=root_dsl_name,
                     **exploration_kwargs)
                 print(
-                    f"\tnew: {exploration_log['new']}\n"
                     f"\treplaced: {exploration_log['replaced']}\n"
+                    f"\tmax. new: {exploration_log['max_novel_representations']}\n"
+                    f"\tnew: {exploration_log['new']}\n"
                     f"\ttotal: {exploration_log['total']}\n"
                     f"\tmin. mass: {exploration_log['min_mass']}\n"
                     f"\tmax. mass: {exploration_log['max_mass']}\n"
@@ -397,9 +403,6 @@ class ExperimentalModel(nn.Module):
                 exploration_log["iteration"] = i
                 exploration_log["activity"] = "exploration"
                 log["metrics"].append(exploration_log)
-                repl = self.quantizer.replacements
-                frontier = [(repl[file] if file in repl else file)
-                            for file in frontier]
 
             return log
 

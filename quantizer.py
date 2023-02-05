@@ -22,7 +22,11 @@ class RestartManager:
             self.utilization[code] = 0
         self.K = len(self.utilization)
 
-    def reset_count(self, selections: List[int]):
+    def restrict(self, size):
+        self.utilization = {code: count for code,
+                            count in self.utilization.items() if code < size}
+
+    def reset_count(self, selections):
         for code in selections:
             self.utilization[code] = 0
 
@@ -73,12 +77,15 @@ class Quantizer(nn.Module):
             self.dsl_mass = dsl["mass"]
         self.dsl_name = dsl_name
 
-    def initial_codebook(self):
-        codebook = nn.Embedding(len(self), self.codebook_dim)
-        codebook.weight.data.uniform_(-1. / (len(self) if len(self)
-                                      > 0. else 1.), 1. / (len(self) if len(self) > 0. else 1.))
+    def _new_codebook(self, size, dim):
+        codebook = nn.Embedding(size, dim)
+        codebook.weight.data.uniform_(-1. / (size if size
+                                      > 0. else 1.), 1. / (size if size > 0. else 1.))
         codebook.weight.data -= codebook.weight.data.mean(dim=0)
         return codebook
+
+    def initial_codebook(self):
+        return self._new_codebook(len(self), self.codebook_dim)
 
     def dsl_file(self, dsl_name=None):
         if hasattr(self, "dsl_name"):
@@ -139,34 +146,34 @@ class Quantizer(nn.Module):
     def structural_prediction(self, _latents, _selections):
         pass
 
-    def make_frontier(self, representations_limit, repr_usage=None):
-        log = {}
-        if repr_usage is not None:
-            self.repr_usage = repr_usage
-        if len(self.repr_usage) > representations_limit:
-            log.update(truncated_usages=True)
-            total = sum(self.repr_usage.values())
-            frontier = np.random.choice(
-                list(self.repr_usage.keys()),
-                int(representations_limit),
-                replace=True,
-                p=[count / total for count in self.repr_usage.values()]).tolist()
-            log.update(frontier_div=len(
-                self.repr_usage) / len(self))
-            log.update(
-                frontier_mass=self.mass_of_representations(frontier))
+    def cull_representations(self, n_preserved, repr_usage):
+        log = {"n_preserved": n_preserved}
+        if len(self) > n_preserved:
+            usages = [(r, repr_usage[r]) for r in self.representations]
+            usages.sort(key=lambda x: x[1])
+            discards = [r for (r, _) in usages[:-n_preserved]]
+            for r in discards:
+                os.remove(os.path.join(self.representations_path, r))
+            self.representations = [r for (r, _) in usages[-n_preserved:]]
+            self.codebook = self.initial_codebook().to(device=self.codebook.weight.device)
+            self.restart_manager.restrict(len(self))
+            self.restart_manager.reset_count(range(len(self)))
+            self._fetch_meta()
+            self.min_mass = min(self.masses.values())
+            self.max_mass = max(self.masses.values())
+            self.avg_mass = sum(self.masses.values()) / len(self.masses)
+            log.update(n_truncated=len(discards),
+                       usages=[usage for (_, usage) in usages],
+                       min_mass=self.min_mass,
+                       max_mass=self.max_mass,
+                       avg_mass=self.avg_mass)
         else:
-            log.update(truncated_usages=False)
-            frontier = []
-            for filename, count in self.repr_usage.items():
-                frontier += [filename] * count
-            log.update(frontier_div=len(self.repr_usage) / len(self))
-            log.update(
-                frontier_mass=self.mass_of_representations(frontier))
-        return frontier, log
+            log.update(n_truncated=0)
+
+        return log
 
     def explore(self,
-                frontier,
+                n_retained,
                 next_dsl_name="dsl",
                 *,
                 exploration_timeout,
@@ -174,9 +181,11 @@ class Quantizer(nn.Module):
                 eval_timeout,
                 eval_attempts,
                 max_diff):
+        max_novel_representations = n_retained - len(self)
         next_dsl_name = self._incremented_dsl_name(next_dsl_name)
         log = utilities.explore(self.name_of_domain,
-                                frontier,
+                                self.representations,
+                                max_novel_representations,
                                 self.dsl_file(),
                                 self.dsl_file(dsl_name=next_dsl_name),
                                 self.representations_path,
@@ -190,14 +199,18 @@ class Quantizer(nn.Module):
         del log["replacements"]
         log.update(
             total=len(self),
-            exploration_timeout=exploration_timeout,
-            min_mass=self.min_mass,
-            max_mass=self.max_mass,
-            avg_mass=self.avg_mass,
+            n_retained=n_retained,
+            max_novel_representations=max_novel_representations,
             prev_dsl_name=self.dsl_name,
             next_dsl_name=next_dsl_name,
+            exploration_timeout=exploration_timeout,
+            program_size_limit=program_size_limit,
             eval_timeout=eval_timeout,
-            eval_attempts=eval_attempts)
+            eval_attempts=eval_attempts,
+            max_diff=max_diff,
+            min_mass=self.min_mass,
+            max_mass=self.max_mass,
+            avg_mass=self.avg_mass)
         self.dsl_name = next_dsl_name
         if log["new"] > 0:
             codebook = self.initial_codebook()
@@ -212,21 +225,19 @@ class Quantizer(nn.Module):
         return log
 
     def compress(self,
-                 frontier,
                  next_dsl_name="dsl",
                  stitch_compression=True,
                  **kwargs):
         if stitch_compression:
             log = self._stitch_compress(
-                frontier, next_dsl_name, **kwargs)
+                next_dsl_name, **kwargs)
         else:
             log = self._dreamcoder_compress(
-                frontier, next_dsl_name, **kwargs)
+                next_dsl_name, **kwargs)
         log.update(stitch_compression=stitch_compression)
         return log
 
     def _dreamcoder_compress(self,
-                             frontier,
                              next_dsl_name,
                              *,
                              iterations,
@@ -239,7 +250,7 @@ class Quantizer(nn.Module):
                              invention_name_prefix,
                              verbosity=0):
         next_dsl_name = self._incremented_dsl_name(next_dsl_name)
-        result = utilities.dreamcoder_compress(frontier,
+        result = utilities.dreamcoder_compress(self.representations,
                                                self.name_of_domain,
                                                self.dsl_file(),
                                                self.dsl_file(
@@ -275,7 +286,6 @@ class Quantizer(nn.Module):
         return result
 
     def _stitch_compress(self,
-                         frontier,
                          next_dsl_name,
                          *,
                          iterations,
@@ -284,13 +294,13 @@ class Quantizer(nn.Module):
                          verbose,
                          **stitch_kwargs):
         next_dsl_name = self._incremented_dsl_name(next_dsl_name)
-        frontier_programs = []
-        for filename in frontier:
+        stitch_programs = []
+        for filename in self.representations:
             with open(os.path.join(self.representations_path, filename)) as f:
                 contents = json.load(f)
-                frontier_programs.append(contents["stitch_program"])
+                stitch_programs.append(contents["stitch_program"])
         res = utilities.stitch_compress(
-            frontier_programs,
+            stitch_programs,
             self.previous_abstractions,
             iterations=iterations,
             n_beta_inversions=n_beta_inversions,
@@ -309,17 +319,6 @@ class Quantizer(nn.Module):
             self.previous_abstractions += result["n_added"]
             replacements = [[prev, cur] for prev, cur in zip(
                 res.json["original"], res.json["rewritten"]) if prev != cur]
-            non_frontier = list(set(self.representations) - set(frontier))
-            if non_frontier:
-                non_frontier_programs = []
-                for filename in non_frontier:
-                    with open(os.path.join(self.representations_path, filename)) as f:
-                        contents = json.load(f)
-                        non_frontier_programs.append(
-                            contents["stitch_program"])
-                replacements.extend(([prev, cur] for prev, cur in zip(
-                    non_frontier_programs, utilities.stitch_rewrite(
-                        non_frontier_programs, res.abstractions))))
             resp = utilities.incorporate_stitch(
                 replacements, invented_primitives, self.name_of_domain, self.dsl_file(
                 ), self.dsl_file(dsl_name=next_dsl_name),

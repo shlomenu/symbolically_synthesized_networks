@@ -34,11 +34,14 @@ let () =
       |> fst |> Dsl.rescale ~max_diff
   in
   let next_dsl_file = SU.to_string @@ SU.member "next_dsl_file" j in
+  let max_novel_representations =
+    SU.to_int @@ SU.member "max_novel_representations" j
+  in
   let program_size_limit = SU.to_int @@ SU.member "program_size_limit" j in
   S.to_file next_dsl_file @@ Dsl.yojson_of_t dsl ;
   let n_new, n_replaced, replacements, n_enumerated, max_ll =
-    Domains.explore domain ~exploration_timeout ~program_size_limit
-      ~eval_timeout ~attempts ~dsl ~representations_dir j
+    Domains.explore domain ~exploration_timeout ~max_novel_representations
+      ~program_size_limit ~eval_timeout ~attempts ~dsl ~representations_dir j
   in
   S.to_channel Out_channel.stdout
   @@ `Assoc
