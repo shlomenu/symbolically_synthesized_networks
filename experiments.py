@@ -1,8 +1,6 @@
-from typing import Optional, Dict, Any
+from typing import Optional
 import os
 import pickle
-import math
-from collections import defaultdict
 from functools import lru_cache
 
 from tqdm import tqdm, trange
@@ -13,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from raven import RavenDataset
 from raven_gen import Matrix, MatrixType, Ruleset, RuleType, ComponentType, LayoutType
-from networks import PixelShuffle_ViT_Encoder, PixelShuffle_ViT_Classifier
+from networks import PixelShuffle_ViT_Encoder
 from quantizer import Quantizer, VQBaseline
 from graph_quantizer import GraphQuantizer
 
@@ -93,38 +91,58 @@ class ExperimentalModel(nn.Module):
              dataset,
              batch_size,
              n_epochs,
+             smoothing_factor,
              device,
-             alpha=.8,
              perf_metric=None,
-             shuffle=True,
              train=True,
-             use_scheduler=True):
+             shuffle=True,
+             use_scheduler=True,
+             n_archetypes=None,
+             n_preserved=None,
+             usage_smoothing_factor=None):
+        assert ((len(dataset) % batch_size) == 0)
+        log = {
+            "smoothing_factor": smoothing_factor,
+            "use_scheduler": use_scheduler}
         if train:
             self.train()
         else:
             self.eval()
-        if self.quantizer is not None:
-            self.quantizer.restart_manager.idleness_limit = batch_size * 3
         dataloader = DataLoader(
             dataset, batch_size=batch_size, shuffle=shuffle)
-        total_loss, total_mass, repr_usage = 0., 0., defaultdict(int)
-        assert ((len(dataset) % batch_size) == 0)
+        data_iterator = iter(dataloader)
         steps_per_epoch = len(dataset) // batch_size
         total_steps = n_epochs * steps_per_epoch
-        bar_format = "{bar}{r_bar} - " \
-            "epoch: {epoch:3.0f}, " \
-            "loss: {loss:.4f}, " \
-            "tot. loss: {tot_loss:.4f}, " \
-            "div.: {div:.4f}, " \
-            "tot. div.: {tot_div:.4f}, " \
-            "mass: {mass:.4f}, " \
-            "tot. mass: {tot_mass:.4f}, " \
-            "perf.: {perf:.4f}"
-        extras = {"epoch": 0, "loss": 0., "tot_loss": 0.,
-                  "div": float("NaN"), "tot_div": float("NaN"),
-                  "mass": float("NaN"), "tot_mass": float("NaN"),
-                  "perf": float("NaN")}
-        data_iterator = iter(dataloader)
+        if self.quantizer is not None:
+            bar_format = \
+                "{bar}{r_bar} - " \
+                "epoch: {epoch:3.0f}, " \
+                "loss: {loss:.4f}, " \
+                "div.: {div:.4f}, " \
+                "mass: {mass:.4f}, " \
+                "perf.: {perf:.4f}"
+            extras = {"epoch": 0,
+                      "loss": 0.,
+                      "div": 0.,
+                      "mass": 0.,
+                      "perf": 0.}
+            self.quantizer.clear_usages()
+            self.quantizer.restart_manager.idleness_limit = batch_size * 3
+            if train:
+                assert type(n_archetypes) is int and n_archetypes <= len(
+                    dataset) and n_archetypes > 0
+                assert type(n_preserved) is int
+                log.update(usage_smoothing_factor=usage_smoothing_factor,
+                           n_archetypes=n_archetypes, n_preserved=n_preserved)
+        else:
+            bar_format = \
+                "{bar}{r_bar} - " \
+                "epoch: {epoch:3.0f}, " \
+                "loss: {loss:.4f}, " \
+                "perf.: {perf:.4f}"
+            extras = {"epoch": 0,
+                      "loss": 0.,
+                      "perf": float("NaN")}
         with TqdmExtraFormat(total=total_steps, bar_format=bar_format, extras=extras) as pbar:
             for i in range(1, total_steps + 1):
                 try:
@@ -132,6 +150,9 @@ class ExperimentalModel(nn.Module):
                 except StopIteration:
                     data_iterator = iter(dataloader)
                     x, target = next(data_iterator)
+                    if self.quantizer is not None:
+                        self.quantizer.finish_epoch(
+                            usage_smoothing_factor, initial_unsmoothed=(not train))
                 x, target = x.to(device), target.to(device)
                 out = self(x)
                 loss = self.loss_f(out, target)
@@ -141,54 +162,61 @@ class ExperimentalModel(nn.Module):
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
-                    if self.quantizer is not None:
-                        self.quantizer.apply_restarts()
                     if use_scheduler:
                         self.scheduler.step(loss)
+                    if self.quantizer is not None:
+                        self.quantizer.apply_restarts()
                 pbar.extras["epoch"] = (i // steps_per_epoch)
                 if perf_metric is not None:
                     perf_metric.tally(out, target)
                     pbar.extras["perf"] = perf_metric.measure()
-                loss = loss.item()
-                pbar.extras["loss"] = alpha * \
-                    loss + (1 - alpha) * pbar.extras["loss"]
-                total_loss += loss
-                pbar.extras["tot_loss"] = total_loss / i
-                if self.quantizer is not None and self.quantizer.filenames is not None:
-                    pbar.extras["div"] = alpha * \
+                pbar.extras["loss"] = smoothing_factor * \
+                    loss.item() + (1 - smoothing_factor) * \
+                    pbar.extras["loss"]
+                if self.quantizer is not None:
+                    pbar.extras["div"] = smoothing_factor * \
                         (len(set(self.quantizer.filenames)) / len(self.quantizer.filenames)) + \
-                        (1 - alpha) * \
-                        (0. if math.isnan(pbar.extras["div"])
-                            else pbar.extras["div"])
-                    for filename in self.quantizer.filenames:
-                        repr_usage[filename] += 1
-                    pbar.extras["tot_div"] = len(
-                        repr_usage) / len(self.quantizer)
-                    mass = self.quantizer.mass_of_representations(
+                        (1 - smoothing_factor) * pbar.extras["div"]
+                    pbar.extras["mass"] = self.quantizer.mass_of_representations(
                         self.quantizer.filenames)
-                    pbar.extras["mass"] = mass
-                    total_mass += mass
-                    pbar.extras["tot_mass"] = total_mass / i
                 pbar.update()
-        if train and self.quantizer is not None:
-            self.quantizer.repr_usage = repr_usage
-        return {
-            "perf": perf_metric.measure() if perf_metric is not None else None,
-            "total_loss": pbar.extras["tot_loss"],
-            "total_diversity": pbar.extras["tot_div"],
-            "total_mass": pbar.extras["tot_mass"],
-            "representations_usages": repr_usage
-        }
+            log.update(
+                perf=(perf_metric.measure()
+                      if perf_metric is not None else None),
+                final_loss=pbar.extras["loss"])
+            if self.quantizer is not None:
+                log.update(
+                    final_diversity=pbar.extras["div"],
+                    final_mass=pbar.extras["mass"])
+        if self.quantizer is not None:
+            try:
+                _ = next(data_iterator)
+            except StopIteration:
+                self.quantizer.finish_epoch(
+                    usage_smoothing_factor, initial_unsmoothed=(not train))
+            log.update(usages=sorted(
+                ((r, usage)
+                    for r, usage in self.quantizer.smoothed_usages.items()),
+                key=lambda x: x[1], reverse=True))
+            if train:
+                n_discarded = self.quantizer.finish_training(
+                    n_archetypes, n_preserved)
+                log.update(n_discarded=n_discarded)
+        return log
 
-    def _run_split(self,
-                   train,
-                   eval,
-                   batch_size,
-                   iterations,
-                   epochs_per_iteration,
-                   device,
-                   perf_metric,
-                   use_scheduler=True):
+    def _run_with_split(self,
+                        train,
+                        eval,
+                        batch_size,
+                        iterations,
+                        epochs_per_iteration,
+                        perf_metric,
+                        smoothing_factor,
+                        device,
+                        n_archetypes=None,
+                        n_preserved=None,
+                        usage_smoothing_factor=None,
+                        use_scheduler=True):
         assert (perf_metric in ("acc", "f1"))
         for i in range(1, iterations + 1):
 
@@ -200,27 +228,33 @@ class ExperimentalModel(nn.Module):
                 else:  # perf_metric == "f1"
                     return F1Metric(label_shape, device=device)
 
-            training_metrics = self._run(
+            training_log = self._run(
                 train,
                 batch_size,
                 epochs_per_iteration,
+                smoothing_factor,
                 device,
                 perf_metric=make_perf_metric(),
-                use_scheduler=use_scheduler)
+                use_scheduler=use_scheduler,
+                n_archetypes=n_archetypes,
+                n_preserved=n_preserved,
+                usage_smoothing_factor=usage_smoothing_factor)
 
-            train_metrics = self._run(
+            train_log = self._run(
                 train,
                 batch_size,
                 1,
+                smoothing_factor,
                 device,
                 perf_metric=make_perf_metric(),
-                shuffle=False,
-                train=False)
+                train=False,
+                shuffle=False)
 
-            eval_metrics = self._run(
+            eval_log = self._run(
                 eval,
                 batch_size,
                 1,
+                smoothing_factor,
                 device,
                 perf_metric=make_perf_metric(),
                 shuffle=False,
@@ -234,63 +268,67 @@ class ExperimentalModel(nn.Module):
                     "training_set_size": len(train),
                     "evaluation_set_size": len(eval),
                     "epochs_per_iteration": epochs_per_iteration,
-                    "training": training_metrics,
-                    "train": train_metrics,
-                    "eval": eval_metrics
+                    "training": training_log,
+                    "train": train_log,
+                    "eval": eval_log
                 }
             )
 
-    def train_split(self,
-                    train,
-                    eval,
-                    batch_size,
-                    iterations,
-                    epochs_per_iteration,
-                    device,
-                    perf_metric,
-                    scarcity=.5,
-                    preservation_rate=.5,
-                    exploration_timeout=15.,
-                    max_diff=.5,
-                    program_size_limit=100,
-                    frontier_of_training=False,
-                    root_dsl_name="dsl",
-                    use_scheduler=True,
-                    exploration_eval_timeout=.1,
-                    exploration_eval_attempts=1,
-                    compression_iterations=3,
-                    compression_beta_inversions=2,
-                    compression_threads=4,
-                    compression_verbose=True,
-                    no_program_synthesis=False):
+    def train_with_split(self,
+                         train,
+                         eval,
+                         batch_size,
+                         iterations,
+                         epochs_per_iteration,
+                         device,
+                         perf_metric,
+                         retain_rate=2.,
+                         preservation_rate=.75,
+                         archetype_rate=.25,
+                         exploration_timeout=15.,
+                         smoothing_factor=.25,
+                         usage_smoothing_factor=.8,
+                         max_diff=.5,
+                         program_size_limit=150,
+                         root_dsl_name="dsl",
+                         use_scheduler=True,
+                         exploration_eval_timeout=.1,
+                         exploration_eval_attempts=1,
+                         compression_iterations=3,
+                         compression_beta_inversions=2,
+                         compression_threads=4,
+                         compression_verbose=True,
+                         no_program_synthesis=False):
+        n_archetypes = int(len(train) * archetype_rate)
         if self.quantizer is None or no_program_synthesis:
-            curve = []
-            for i, log in self._run_split(
+            logs = []
+            for i, log in self._run_with_split(
                     train,
                     eval,
                     batch_size,
                     iterations,
                     epochs_per_iteration,
-                    device,
                     perf_metric,
+                    smoothing_factor,
+                    device,
+                    n_archetypes=n_archetypes,
+                    usage_smoothing_factor=usage_smoothing_factor,
                     use_scheduler=use_scheduler):
-                train_loss, train_perf = log["train"]["total_loss"], log["train"]["perf"]
-                eval_loss, eval_perf = log["eval"]["total_loss"], log["eval"]["perf"]
                 print(
                     f"cycle: {i}/{iterations}, "
-                    f"train loss: {train_loss:.4E}, "
-                    f"eval loss: {eval_loss:.4E}, "
-                    f"train perf.: {train_perf:.4f}, "
-                    f"eval perf.: {eval_perf:.4f}")
+                    f"train loss: {log['train']['final_loss']:.4E}, "
+                    f"eval loss: {log['eval']['final_loss']:.4E}, "
+                    f"train perf.: {log['train']['perf']:.4f}, "
+                    f"eval perf.: {log['eval']['perf']:.4f}")
                 log["iteration"] = i
-                curve.append(log)
+                logs.append(log)
 
-            return curve
+            return logs
         else:
-            n_retained = int(scarcity * len(train))
+            logs = []
+            n_retained = int(len(train) * retain_rate)
             n_preserved = int(preservation_rate * n_retained)
-            log = {"frontier_of_training": True, "scarcity": scarcity,
-                   "preservation_rate": preservation_rate, "metrics": []}
+            assert n_preserved < n_retained
             exploration_kwargs = {
                 "exploration_timeout": exploration_timeout,
                 "program_size_limit": program_size_limit,
@@ -307,74 +345,64 @@ class ExperimentalModel(nn.Module):
             if not self.quantizer.representations:
                 print(f"initial exploration...")
                 exploration_log = self.quantizer.explore(
-                    n_retained, next_dsl_name=root_dsl_name,
+                    n_retained,
+                    next_dsl_name=root_dsl_name,
                     **exploration_kwargs)
                 print(
-                    f"\tnew: {exploration_log['new']}\n"
                     f"\treplaced: {exploration_log['replaced']}\n"
-                    f"\ttotal: {exploration_log['total']}\n"
                     f"\tmax. novel representations: {exploration_log['max_novel_representations']}\n"
+                    f"\tnew: {exploration_log['new']}\n"
+                    f"\ttotal: {exploration_log['total']}\n"
                     f"\tmin. mass: {exploration_log['min_mass']}\n"
                     f"\tmax. mass: {exploration_log['max_mass']}\n"
                     f"\tavg. mass: {exploration_log['avg_mass']}\n"
                 )
                 exploration_log["iteration"] = 0
                 exploration_log["activity"] = "exploration"
-                log["metrics"].append(exploration_log)
+                logs.append(exploration_log)
                 self.quantizer.clear_visualizations()
                 self.quantizer.visualize()
-            for i, psn_log in self._run_split(
+            for i, psn_log in self._run_with_split(
                     train,
                     eval,
                     batch_size,
                     iterations,
                     epochs_per_iteration,
-                    device,
                     perf_metric,
+                    smoothing_factor,
+                    device,
+                    n_archetypes=n_archetypes,
+                    n_preserved=n_preserved,
+                    usage_smoothing_factor=usage_smoothing_factor,
                     use_scheduler=use_scheduler):
                 print(f"cycle: {i}/{iterations}")
                 print(
                     "\taggregate training state.:\n"
-                    f"\t\tloss: {psn_log['training']['total_loss']:.4f}, "
-                    f"div.: {psn_log['training']['total_diversity']:.4f}, "
-                    f"mass: {psn_log['training']['total_mass']:.4f}, "
-                    f"perf.: {psn_log['training']['perf']:.4f}"
+                    f"\t\tloss: {psn_log['training']['final_loss']:.4f}, "
+                    f"div.: {psn_log['training']['final_diversity']:.4f}, "
+                    f"mass: {psn_log['training']['final_mass']:.4f}, "
+                    f"perf.: {psn_log['training']['perf']:.4f}, "
+                    f"discarded: {psn_log['training']['n_discarded']}"
                 )
                 print(
                     "\taggregate training set stat.:\n"
-                    f"\t\tloss: {psn_log['train']['total_loss']:.4f}, "
-                    f"div.: {psn_log['train']['total_diversity']:.4f}, "
-                    f"mass: {psn_log['train']['total_mass']:.4f}, "
+                    f"\t\tloss: {psn_log['train']['final_loss']:.4f}, "
+                    f"div.: {psn_log['train']['final_diversity']:.4f}, "
+                    f"mass: {psn_log['train']['final_mass']:.4f}, "
                     f"perf.: {psn_log['train']['perf']:.4f}"
                 )
                 print(
                     "\taggregate evaluation set stat.:\n"
-                    f"\t\tloss: {psn_log['eval']['total_loss']:.4f}, "
-                    f"div.: {psn_log['eval']['total_diversity']:.4f}, "
-                    f"mass: {psn_log['eval']['total_mass']:.4f}, "
+                    f"\t\tloss: {psn_log['eval']['final_loss']:.4f}, "
+                    f"div.: {psn_log['eval']['final_diversity']:.4f}, "
+                    f"mass: {psn_log['eval']['final_mass']:.4f}, "
                     f"perf.: {psn_log['eval']['perf']:.4f}"
                 )
                 psn_log["iteration"] = i
                 psn_log["activity"] = "nn_training"
-                log["metrics"].append(psn_log)
-                print("culling frontier...")
-                if frontier_of_training:
-                    repr_usage = psn_log["training"]["representations_usages"]
-                else:
-                    repr_usage = psn_log["train"]["representations_usages"]
-                cull_log: Dict[str, Any] = self.quantizer.cull_representations(
-                    n_preserved, repr_usage)
-                if cull_log["n_truncated"] > 0:
-                    print(
-                        f"\tnumber discarded: {cull_log['n_truncated']},\n"
-                        f"\tmin. mass: {cull_log['min_mass']},\n"
-                        f"\tmax. mass: {cull_log['max_mass']},\n"
-                        f"\tavg. mass: {cull_log['avg_mass']},\n")
-                cull_log["iteration"] = i
-                cull_log["activity"] = "cull_representations"
-                log["metrics"].append(cull_log)
+                logs.append(psn_log)
                 self.quantizer.clear_visualizations()
-                self.quantizer.visualize(self.quantizer.representations)
+                self.quantizer.visualize(self.quantizer.archetypes)
                 print("compressing...")
                 compression_log = self.quantizer.compress(
                     next_dsl_name=root_dsl_name, **compression_kwargs)
@@ -385,7 +413,7 @@ class ExperimentalModel(nn.Module):
                         f"\tnew dsl mass: {compression_log['next_dsl_mass']}")
                 compression_log["iteration"] = i
                 compression_log["activity"] = "compression"
-                log["metrics"].append(compression_log)
+                logs.append(compression_log)
                 print("exploring...")
                 exploration_log = self.quantizer.explore(
                     n_retained,
@@ -402,9 +430,9 @@ class ExperimentalModel(nn.Module):
                 )
                 exploration_log["iteration"] = i
                 exploration_log["activity"] = "exploration"
-                log["metrics"].append(exploration_log)
+                logs.append(exploration_log)
 
-            return log
+            return logs
 
 
 def raven_baseline(
@@ -480,7 +508,7 @@ def raven_psn(
         graph_dim=512,
         max_conn=10,
         beta=3.,
-        dropout_rate=.6,
+        dropout_rate=.3,
         device="cuda:0"):
     pre_quantizer = PixelShuffle_ViT_Encoder(
         input_size,

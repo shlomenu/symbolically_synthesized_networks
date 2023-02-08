@@ -1,6 +1,7 @@
 from typing import Optional, Tuple, List
 import os
 import json
+from copy import deepcopy
 from collections import defaultdict
 
 import numpy as np
@@ -29,6 +30,12 @@ class RestartManager:
     def reset_count(self, selections):
         for code in selections:
             self.utilization[code] = 0
+
+    def reset(self, size):
+        self.restrict(size)
+        self.reset_count(range(size))
+        for code in range(size):
+            self.add_code(code)
 
     def find_restarts(self, selections: List[int]):
         self.reset_count(selections)
@@ -62,11 +69,14 @@ class Quantizer(nn.Module):
         self.load_dsl(dsl_name)
         self.representations = sorted((filename for filename in os.listdir(
             self.representations_path) if filename.endswith(".json")))
+        self.archetypes = deepcopy(self.representations)
+        self.discards = []
         self.masses, self.programs = self._fetch_meta()
-        self.repr_usage = defaultdict(int)
+        self.clear_usages()
         self.explore_kwargs = explore_kwargs
         self.codebook_dim = codebook_dim
-        self.codebook = self.initial_codebook()
+        self.base_codebook = self.initial_codebook()
+        self.archetypal_codebook = self.initial_codebook()
         self.restart_manager = RestartManager(len(self))
         self.restarts: Optional[Tuple[th.Tensor, List[int]]] = None
         self.beta = beta
@@ -99,10 +109,54 @@ class Quantizer(nn.Module):
     def __len__(self):
         return len(self.representations)
 
+    def finish_epoch(self, smoothing_factor=None, initial_unsmoothed=True):
+        for r, usage in self.smoothed_usages.items():
+            usages = self.complete_usages[r]
+            if len(usages) == 1 and initial_unsmoothed:
+                self.smoothed_usages[r] = usages[-1]
+            else:
+                assert smoothing_factor is not None and \
+                    0. < smoothing_factor and smoothing_factor <= 1.
+                self.smoothed_usages[r] = smoothing_factor * \
+                    usages[-1] + (1. - smoothing_factor) * usage
+            usages.append(0)
+
+    def finish_training(self, n_archetypes, n_preserved):
+        usage_order = [
+            r for (r, _) in sorted(
+                ((r, usage)
+                    for r, usage in self.smoothed_usages.items()),
+                key=lambda x: x[1], reverse=True)
+        ]
+        archetypes = deepcopy(usage_order[:n_archetypes])
+        representations = deepcopy(usage_order[:n_preserved])
+        discards = deepcopy(usage_order[n_preserved:])
+        self.archetypal_codebook = self._transfer_codebook_subset(archetypes)
+        self.base_codebook = self._transfer_codebook_subset(representations)
+        self.archetypes, self.representations, self.discards = (
+            archetypes, representations, discards)
+        for r in self.discards:
+            os.remove(os.path.join(self.representations_path, r))
+        return len(self.discards)
+
+    def _transfer_codebook_subset(self, rs):
+        codebook = self._new_codebook(len(rs), self.codebook_dim).to(
+            device=self.base_codebook.weight.device)
+        codebook.weight.data[:len(rs)] = \
+            self.base_codebook.weight.data[th.tensor(
+                [self.representations.index(r) for r in rs])]
+        return codebook
+
+    def clear_usages(self):
+        self.complete_usages = {r: [0] for r in self.representations}
+        self.smoothed_usages = {r: 0 for r in self.representations}
+
     def forward(self, x):
         assert x.size(1) == self.codebook_dim
         x_codebook, x_encoding_inds = self.nearest_neighbors(x)
         x_quantized = x + (x_codebook - x).detach()
+        for selection in x_encoding_inds.flatten().tolist():
+            self.complete_usages[self.representations[selection]][-1] += 1
         out, restarts, self.filenames = self.structural_prediction(
             x_quantized, x_encoding_inds)  # type: ignore
         if restarts:
@@ -120,57 +174,32 @@ class Quantizer(nn.Module):
         return out
 
     def nearest_neighbors(self, latents):
-        K = self.codebook.weight.size(0)
+        codebook = self.base_codebook if self.training else self.archetypal_codebook
         dist = th.sum(latents ** 2, dim=1, keepdim=True) + \
-            th.sum(self.codebook.weight ** 2, dim=1) - \
-            2 * th.matmul(latents,
-                          self.codebook.weight.t())  # shape: b k
+            th.sum(codebook.weight ** 2, dim=1) - \
+            2 * th.matmul(latents, codebook.weight.t())  # shape: b k
         encoding_inds = dist.argmin(dim=1).unsqueeze(dim=1)
         encoding_one_hot = th.zeros(
             encoding_inds.size(0) * encoding_inds.size(1),
-            K, device=latents.device)  # shape: b k
+            codebook.weight.size(0), device=latents.device)  # shape: b k
         encoding_one_hot.scatter_(dim=1, index=encoding_inds, value=1)
         quantized_latents = th.matmul(
-            encoding_one_hot, self.codebook.weight)
+            encoding_one_hot, codebook.weight)
         return quantized_latents, encoding_inds
 
     def apply_restarts(self):
         if self.restarts is not None:
             starts, to_restart = self.restarts
-            randomized = starts[np.random.choice(starts.size(0),
-                                                 min(len(to_restart), starts.size(0)), replace=False)]
-            self.codebook.weight.data[to_restart] = randomized
+            randomized = starts[np.random.choice(
+                starts.size(0),
+                min(len(to_restart), starts.size(0)),
+                replace=False)]
+            self.base_codebook.weight.data[to_restart] = randomized
             self.restart_manager.reset_count(to_restart)
             self.restarts = None
 
     def structural_prediction(self, _latents, _selections):
         pass
-
-    def cull_representations(self, n_preserved, repr_usage):
-        log = {"n_preserved": n_preserved}
-        if len(self) > n_preserved:
-            usages = [(r, repr_usage[r]) for r in self.representations]
-            usages.sort(key=lambda x: x[1])
-            discards = [r for (r, _) in usages[:-n_preserved]]
-            for r in discards:
-                os.remove(os.path.join(self.representations_path, r))
-            self.representations = [r for (r, _) in usages[-n_preserved:]]
-            self.codebook = self.initial_codebook().to(device=self.codebook.weight.device)
-            self.restart_manager.restrict(len(self))
-            self.restart_manager.reset_count(range(len(self)))
-            self._fetch_meta()
-            self.min_mass = min(self.masses.values())
-            self.max_mass = max(self.masses.values())
-            self.avg_mass = sum(self.masses.values()) / len(self.masses)
-            log.update(n_truncated=len(discards),
-                       usages=[usage for (_, usage) in usages],
-                       min_mass=self.min_mass,
-                       max_mass=self.max_mass,
-                       avg_mass=self.avg_mass)
-        else:
-            log.update(n_truncated=0)
-
-        return log
 
     def explore(self,
                 n_retained,
@@ -184,7 +213,7 @@ class Quantizer(nn.Module):
         max_novel_representations = n_retained - len(self)
         next_dsl_name = self._incremented_dsl_name(next_dsl_name)
         log = utilities.explore(self.name_of_domain,
-                                self.representations,
+                                self.archetypes,
                                 max_novel_representations,
                                 self.dsl_file(),
                                 self.dsl_file(dsl_name=next_dsl_name),
@@ -213,15 +242,11 @@ class Quantizer(nn.Module):
             avg_mass=self.avg_mass)
         self.dsl_name = next_dsl_name
         if log["new"] > 0:
-            codebook = self.initial_codebook()
-            if self.codebook.weight.size(0) > 0:
-                codebook.weight.data[:self.codebook.weight.size(
-                    0)] = self.codebook.weight.data
-            self.codebook = codebook.to(
-                device=self.codebook.weight.device)
-            for code in range(len(self)):
-                self.restart_manager.add_code(code)
+            self.base_codebook = self.initial_codebook().to(
+                device=self.base_codebook.weight.device)
+            self.restart_manager.reset(len(self))
             self.restarts = None
+            self.clear_usages()
         return log
 
     def compress(self,
@@ -250,7 +275,7 @@ class Quantizer(nn.Module):
                              invention_name_prefix,
                              verbosity=0):
         next_dsl_name = self._incremented_dsl_name(next_dsl_name)
-        result = utilities.dreamcoder_compress(self.representations,
+        result = utilities.dreamcoder_compress(self.archetypes,
                                                self.name_of_domain,
                                                self.dsl_file(),
                                                self.dsl_file(
@@ -295,7 +320,7 @@ class Quantizer(nn.Module):
                          **stitch_kwargs):
         next_dsl_name = self._incremented_dsl_name(next_dsl_name)
         stitch_programs = []
-        for filename in self.representations:
+        for filename in self.archetypes:
             with open(os.path.join(self.representations_path, filename)) as f:
                 contents = json.load(f)
                 stitch_programs.append(contents["stitch_program"])
@@ -319,6 +344,18 @@ class Quantizer(nn.Module):
             self.previous_abstractions += result["n_added"]
             replacements = [[prev, cur] for prev, cur in zip(
                 res.json["original"], res.json["rewritten"]) if prev != cur]
+            non_archetypal = list(
+                set(self.representations) - set(self.archetypes))
+            if non_archetypal:
+                non_archetypal_programs = []
+                for filename in non_archetypal:
+                    with open(os.path.join(self.representations_path, filename)) as f:
+                        contents = json.load(f)
+                        non_archetypal_programs.append(
+                            contents["stitch_program"])
+                replacements.extend(([prev, cur] for prev, cur in zip(
+                    non_archetypal_programs, utilities.stitch_rewrite(
+                        non_archetypal_programs, res.abstractions))))
             resp = utilities.incorporate_stitch(
                 replacements, invented_primitives, self.name_of_domain, self.dsl_file(
                 ), self.dsl_file(dsl_name=next_dsl_name),
@@ -344,14 +381,25 @@ class Quantizer(nn.Module):
 
     def _load_representations(self, replacements):
         self.replacements = replacements
-        self.representations = [(self.replacements[file] if file in self.replacements else file)
-                                for file in self.representations]
-        self.representations.extend(
-            set(os.listdir(self.representations_path)) - set(self.representations))
+        self.representations = [(self.replacements[r] if r in self.replacements else r)
+                                for r in self.representations]
+        self.archetypes = [(self.replacements[r] if r in self.replacements else r)
+                           for r in self.archetypes]
+        self.complete_usages = dict(
+            (((self.replacements[r] if r in self.replacements else r), c) for r, c in self.complete_usages.items()))
+        self.smoothed_usages = dict(
+            (((self.replacements[r] if r in self.replacements else r), c)
+             for r, c in self.smoothed_usages.items())
+        )
+        new = set(os.listdir(self.representations_path)) - \
+            set(self.representations)
+        self.representations.extend(new)
+        self.complete_usages.update(((r, [0]) for r in new))
+        self.smoothed_usages.update(((r, 0) for r in new))
         self.masses, self.programs = self._fetch_meta()
         self.min_mass = min(self.masses.values())
         self.max_mass = max(self.masses.values())
-        self.avg_mass = sum(self.masses.values()) / len(self.masses)
+        self.avg_mass = sum(self.masses.values(), start=0) / len(self.masses)
 
     def _fetch_meta(self):
         masses, programs = {}, {}
@@ -450,3 +498,9 @@ class VQBaseline(nn.Module):
             self.codebook.weight.data[to_restart] = randomized
             self.restart_manager.reset_count(to_restart)
             self.restarts = None
+
+    def finish_epoch(self):
+        pass
+
+    def finish_training(self):
+        pass
