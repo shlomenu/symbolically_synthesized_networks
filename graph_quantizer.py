@@ -134,12 +134,12 @@ class GraphQuantizer(Quantizer):
                 repr["output"], self.emb_matrix, device)
             graphs.append(graph)
             nfeats.append(nfeat + latent[i])
-            efeats.append(efeat + latent[i])
+            efeats.append((efeat + latent[i]).tile((2, 1)))
             filenames.append(filename)
         graphs, nfeats, efeats = (
             dgl.batch(graphs),
             th.cat(nfeats, dim=0),
-            self.edge_dropout(th.cat(efeats, dim=0)).tile((2, 1)),
+            self.edge_dropout(th.cat(efeats, dim=0)),
         )
         for node_dropout, conv in zip(self.node_dropouts, self.convs):
             nfeats = conv(graphs, node_dropout(nfeats), efeats)
