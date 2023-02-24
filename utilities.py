@@ -118,7 +118,8 @@ def invoke_binary_with_json(path_to_binary, msg_json):
         process = subprocess.Popen(path_to_binary,
                                    stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE)
-        resp, _ = process.communicate(bytes(msg, encoding="utf-8"))
+        resp, _ = process.communicate(
+            bytes(msg, encoding="utf-8"))  # type:ignore
     except OSError as exc:
         raise exc
     try:
