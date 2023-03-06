@@ -1,0 +1,1 @@
+{"program":"(push (add (connect identity)))","stitch_program":"(push (add (connect identity)))","size":4,"mass":4,"output":{"edges":[[[1,0],[2,0]],[[0,0],[2,1]]],"next_id":3,"size":2,"max_conn":10},"primary_key":[2,[1,1]],"secondary_key":[[1,[0]],[0,[1]]]}

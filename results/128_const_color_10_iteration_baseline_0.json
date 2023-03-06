@@ -1,0 +1,292 @@
+[
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 0.78662109375,
+            "total_loss": 0.47971567897184286,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 0.859375,
+            "total_loss": 0.35909300530329347,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.6166666746139526,
+            "total_loss": 0.7690849751234055,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 1
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 0.8603515625,
+            "total_loss": 0.32332241806943784,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 0.984375,
+            "total_loss": 0.11650798690970987,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.6416666507720947,
+            "total_loss": 1.0164477976163229,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 2
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 0.8681640625,
+            "total_loss": 0.30912885094403464,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 0.8203125,
+            "total_loss": 0.34380410239100456,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.6083333492279053,
+            "total_loss": 1.0310476051767667,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 3
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 0.9638671875,
+            "total_loss": 0.09427618554214234,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 1.0,
+            "total_loss": 0.00036976423871237785,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.653333306312561,
+            "total_loss": 2.2173595254371565,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 4
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 1.0,
+            "total_loss": 0.0002188365726563113,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 1.0,
+            "total_loss": 0.0001293135912874277,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.653333306312561,
+            "total_loss": 2.437153504540523,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 5
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 1.0,
+            "total_loss": 9.448665229250253e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 1.0,
+            "total_loss": 6.82204072290915e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.6516666412353516,
+            "total_loss": 2.5751140959809224,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 6
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 1.0,
+            "total_loss": 5.389195799931912e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 1.0,
+            "total_loss": 4.205679414326369e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.6516666412353516,
+            "total_loss": 2.6812927833199502,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 7
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 1.0,
+            "total_loss": 3.479459558941578e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 1.0,
+            "total_loss": 2.8429001758922823e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.6516666412353516,
+            "total_loss": 2.7686677489119274,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 8
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 1.0,
+            "total_loss": 2.4164206162580193e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 1.0,
+            "total_loss": 2.0316523574592793e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.6508333086967468,
+            "total_loss": 2.8424892227227487,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 9
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "perf": 1.0,
+            "total_loss": 1.7585378186746325e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "train": {
+            "perf": 1.0,
+            "total_loss": 1.5110058825484884e-05,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "eval": {
+            "perf": 0.6508333086967468,
+            "total_loss": 2.9080992253993947,
+            "total_diversity": NaN,
+            "total_mass": NaN,
+            "representations_usages": {}
+        },
+        "iteration": 10
+    }
+]

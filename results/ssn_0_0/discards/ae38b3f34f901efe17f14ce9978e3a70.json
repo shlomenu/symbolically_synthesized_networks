@@ -1,0 +1,1 @@
+{"program":"(push (add (connect {fn_3}(add ({fn_2}(lam (next_port ($0 identity))) connect)))))","stitch_program":"(push (add (connect fn_3)))","size":4,"mass":7,"output":{"edges":[[[3,1],[4,0]],[[1,0],[2,0]],[[0,1],[4,3]],[[0,0],[2,1]]],"next_id":5,"size":3,"max_conn":10},"primary_key":[3,[1,1,2]],"secondary_key":[[3,[0]],[1,[0]],[0,[1,3]]]}

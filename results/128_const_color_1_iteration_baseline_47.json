@@ -1,0 +1,24 @@
+[
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": true,
+            "perf": 0.80615234375,
+            "final_loss": 0.10145754726453411
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 0.9765625,
+            "final_loss": 0.09857110327856208
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6499999761581421,
+            "final_loss": 0.9679961612155726
+        }
+    }
+]

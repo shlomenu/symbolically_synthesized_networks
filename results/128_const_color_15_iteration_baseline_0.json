@@ -1,0 +1,332 @@
+[
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 0.78564453125,
+            "final_loss": 0.3480552933041478
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 0.78125,
+            "final_loss": 0.44742907549523736
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6324999928474426,
+            "final_loss": 0.5143199505012558
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 0.8564453125,
+            "final_loss": 0.17260273902046785
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 0.921875,
+            "final_loss": 0.13826179081180906
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6033333539962769,
+            "final_loss": 1.118114620491669
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 0.89404296875,
+            "final_loss": 0.27532296657435473
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 0.9296875,
+            "final_loss": 0.22777372521298245
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6924999952316284,
+            "final_loss": 0.8062397287387304
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 0.93701171875,
+            "final_loss": 0.04145052659935178
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 0.9921875,
+            "final_loss": 0.05756912956106652
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6541666388511658,
+            "final_loss": 0.767294582861912
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 0.99658203125,
+            "final_loss": 7.589352539742649e-05
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 0.00021339376809233405
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6549999713897705,
+            "final_loss": 1.1399698628463941
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 4.793464185424229e-05
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 7.912673819700058e-05
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6558333039283752,
+            "final_loss": 1.238993702981652
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 1.201912480689682e-05
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 4.310086869077643e-05
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6549999713897705,
+            "final_loss": 1.2993695900815632
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 1.4819673023065806e-05
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 2.754772238941317e-05
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6583333611488342,
+            "final_loss": 1.3472668923378033
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 8.153586564232196e-06
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 1.8707414669300324e-05
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6583333611488342,
+            "final_loss": 1.3861711301208124
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 1.1740040921495646e-05
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 1.356241374153091e-05
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.659166693687439,
+            "final_loss": 1.4206590018353118
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 9.798517348682625e-06
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 1.035158226668108e-05
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6583333611488342,
+            "final_loss": 1.4539217479567355
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 5.820257838518477e-06
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 7.990898107894626e-06
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.659166693687439,
+            "final_loss": 1.479676701009856
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 5.040328707584824e-06
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 6.301035940764384e-06
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6600000262260437,
+            "final_loss": 1.5030940114277611
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 4.896329794533227e-06
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 5.075394335566161e-06
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.6583333611488342,
+            "final_loss": 1.5274114529445595
+        }
+    },
+    {
+        "perf_metric": "acc",
+        "batch_size": 8,
+        "training_set_size": 128,
+        "evaluation_set_size": 1200,
+        "epochs_per_iteration": 16,
+        "training": {
+            "use_scheduler": false,
+            "perf": 1.0,
+            "final_loss": 1.8165983075596008e-06
+        },
+        "train": {
+            "use_scheduler": true,
+            "perf": 1.0,
+            "final_loss": 4.129832105686889e-06
+        },
+        "eval": {
+            "use_scheduler": true,
+            "perf": 0.659166693687439,
+            "final_loss": 1.5513351279765022
+        }
+    }
+]
