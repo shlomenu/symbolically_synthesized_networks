@@ -1,10 +1,5 @@
 .vscode/
 __pycache__
 .envrc
-discrete_representations/
 _build/
-notes/
 graph/
-*.pkl
-*.pt
-*.pth
