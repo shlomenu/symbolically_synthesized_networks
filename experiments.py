@@ -73,7 +73,7 @@ def run_baseline(
         "perf_metric": perf_metric,
         "avg_train_perf": np.mean(train_runs, axis=0).tolist(),
         "avg_eval_perf": np.mean(eval_runs, axis=0).tolist()}
-    with open(os.path.join("results", f"{root_name}_stat.json"), "w") as f:
+    with open(os.path.join("results", f"{root_name}_summary.json"), "w") as f:
         json.dump(stat, f)
     return stat
 
@@ -198,7 +198,7 @@ def plot_single_iter_baseline_results(log_base_name, population_size, window_siz
     plt.title("Baseline")
     plt.grid(axis="y", color=".95")
     plt.legend(title="Dataset")
-    plt.savefig(f"results/single_iteration_baseline.pdf")
+    plt.savefig(f"results/{log_base_name}_plot.pdf")
     plt.clf()
 
 
