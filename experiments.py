@@ -198,7 +198,7 @@ def plot_single_iter_baseline_results(log_base_name, population_size, window_siz
     plt.title("Baseline")
     plt.grid(axis="y", color=".95")
     plt.legend(title="Dataset")
-    plt.savefig(f"results/single_iteration_baseline.svg")
+    plt.savefig(f"results/single_iteration_baseline.pdf")
     plt.clf()
 
 
@@ -232,7 +232,7 @@ def plot_experimental_results(log_dir, window_size):
         plt.title(f"Experimental (Iteration {i})")
         plt.grid(axis="y", color=".95")
         plt.legend(title="Dataset")
-        plt.savefig(f"results/{log_dir}/experimental_iteration_{i}.svg")
+        plt.savefig(f"results/{log_dir}/experimental_iteration_{i}.pdf")
         plt.clf()
 
 
